@@ -46,8 +46,20 @@ cargo run -- avdecc-probe 192.168.1.50
 This only opens the proxy's HTTP `CONNECT` tunnel, listens briefly for data,
 and prints a bounded JSON summary. It decodes complete version-0 proxy frames
 when present, but preserves all received bytes as a hex preview. The current
-848 advertises proxy protocol version 1; this app does not yet transmit the
-version-1 handshake or any AECP descriptor command.
+848 advertises DNS-SD `Version=1` and answers a v0 envelope with a nonzero
+reserved field; this app does not transmit any AECP descriptor command.
+
+For a standards-defined v0 compatibility check, request an ephemeral proxy
+controller identity using the host interface's MAC address:
+
+```sh
+cargo run -- avdecc-probe 192.168.1.50 --request-entity-id eth2
+```
+
+This sends only the v0 `ENTITY_ID_REQUEST` APPDU; it does not send AECP or
+control the audio interface. A usable v0 reply has `entity_id_reserved: 0`.
+Treat any other result as protocol evidence, not as permission to try a guessed
+version-1 frame.
 
 An 848 directly attached to this Linux machine may advertise only IPv6. In that
 case, use bracket notation, for example `"[2604:4080:1503:8036::1]"`.

@@ -1,17 +1,30 @@
 use std::io::{Read, Write};
-use std::net::{Ipv6Addr, TcpStream, ToSocketAddrs};
+use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 use crate::device::{json_escape, parse_http_response, HttpResponse};
 
-const APP_HEADER_LEN: usize = 10;
+#[path = "avdecc_format.rs"]
+mod avdecc_format;
+
+use avdecc_format::{app_frame_json, hex_preview};
+
+#[path = "avdecc_transport.rs"]
+mod avdecc_transport;
+
+use avdecc_transport::{connect_with_timeout, parse_proxy_address, validate_proxy_path};
+
+// IEEE 1722.1-2013 Annex C APPDU: version, type, payload length, EUI-48,
+// then a reserved/status u16 before the payload.
+const APP_HEADER_LEN: usize = 12;
+const APP_MAX_PAYLOAD_LEN: usize = 1490;
 const CONNECT_HEADER_LIMIT: usize = 32 * 1024;
 const INITIAL_FRAME_WAIT: Duration = Duration::from_millis(250);
 const INITIAL_DATA_LIMIT: usize = 8 * 1024;
 
 const APP_NOP: u8 = 0x00;
-const APP_ENTITY_GUID_REQUEST: u8 = 0x01;
-const APP_ENTITY_GUID_RESPONSE: u8 = 0x02;
+const APP_ENTITY_ID_REQUEST: u8 = 0x01;
+const APP_ENTITY_ID_RESPONSE: u8 = 0x02;
 const APP_LINK_UP: u8 = 0x03;
 const APP_LINK_DOWN: u8 = 0x04;
 const APP_AVDECC_FROM_APS: u8 = 0x05;
@@ -22,7 +35,26 @@ struct AppFrame {
     version: u8,
     message_type: u8,
     address: [u8; 6],
+    reserved: u16,
     payload: Vec<u8>,
+}
+
+impl AppFrame {
+    fn encode(&self) -> Result<Vec<u8>, String> {
+        if self.payload.len() > APP_MAX_PAYLOAD_LEN {
+            return Err(format!(
+                "AVDECC Proxy payload exceeds {APP_MAX_PAYLOAD_LEN} byte limit"
+            ));
+        }
+        let mut bytes = Vec::with_capacity(APP_HEADER_LEN + self.payload.len());
+        bytes.push(self.version);
+        bytes.push(self.message_type);
+        bytes.extend_from_slice(&(self.payload.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(&self.address);
+        bytes.extend_from_slice(&self.reserved.to_be_bytes());
+        bytes.extend_from_slice(&self.payload);
+        Ok(bytes)
+    }
 }
 
 pub(crate) struct AvdeccProbeResult {
@@ -30,20 +62,40 @@ pub(crate) struct AvdeccProbeResult {
     reason: String,
     frames: Vec<AppFrame>,
     initial_data: Vec<u8>,
+    entity_id: Option<u64>,
+    entity_id_reserved: Option<u16>,
+}
+
+#[derive(Default)]
+struct EntityIdResult {
+    entity_id: Option<u64>,
+    reserved: Option<u16>,
+    frames: Vec<AppFrame>,
 }
 
 pub(crate) fn probe(
     host: &str,
     path: &str,
+    interface: Option<&str>,
     timeout: Duration,
 ) -> Result<AvdeccProbeResult, String> {
     let mut proxy = AvdeccProxy::connect(host, path, timeout)?;
     let initial_data = proxy.read_available_for(timeout.min(INITIAL_FRAME_WAIT))?;
+    let entity_id_result = if let Some(interface) = interface {
+        proxy.request_entity_id(read_interface_mac(interface)?, timeout)?
+    } else {
+        EntityIdResult::default()
+    };
     Ok(AvdeccProbeResult {
         status: proxy.response.status,
         reason: proxy.response.reason,
-        frames: decode_complete_v0_frames(&initial_data),
+        frames: decode_complete_v0_frames(&initial_data)
+            .into_iter()
+            .chain(entity_id_result.frames)
+            .collect(),
         initial_data,
+        entity_id: entity_id_result.entity_id,
+        entity_id_reserved: entity_id_result.reserved,
     })
 }
 
@@ -55,11 +107,19 @@ pub(crate) fn write_probe_result(result: &AvdeccProbeResult) {
         .collect::<Vec<_>>()
         .join(",");
     println!(
-        "{{\"status\":{},\"reason\":\"{}\",\"initial_bytes\":{},\"initial_preview\":\"{}\",\"v0_frames\":[{}]}}",
+        "{{\"status\":{},\"reason\":\"{}\",\"initial_bytes\":{},\"initial_preview\":\"{}\",\"entity_id\":{},\"entity_id_reserved\":{},\"v0_frames\":[{}]}}",
         result.status,
         json_escape(&result.reason),
         result.initial_data.len(),
         hex_preview(&result.initial_data, 64),
+        result
+            .entity_id
+            .map(|entity_id| format!("\"{entity_id:016x}\""))
+            .unwrap_or_else(|| "null".to_string()),
+        result
+            .entity_id_reserved
+            .map(|reserved| reserved.to_string())
+            .unwrap_or_else(|| "null".to_string()),
         frames
     );
 }
@@ -136,14 +196,127 @@ impl AvdeccProxy {
         }
         Ok(data)
     }
+
+    fn request_entity_id(
+        &mut self,
+        primary_mac: [u8; 6],
+        timeout: Duration,
+    ) -> Result<EntityIdResult, String> {
+        // This allocates an ephemeral controller identity in the proxy. It is
+        // not an AECP command and cannot modify the attached AVDECC entity.
+        let request = AppFrame {
+            version: 0,
+            message_type: APP_ENTITY_ID_REQUEST,
+            address: primary_mac,
+            reserved: 0,
+            payload: vec![0; 8],
+        };
+        self.stream
+            .write_all(&request.encode()?)
+            .map_err(|error| format!("write AVDECC Proxy entity ID request failed: {error}"))?;
+
+        let started = Instant::now();
+        let mut frames = Vec::new();
+        loop {
+            let remaining = timeout
+                .checked_sub(started.elapsed())
+                .ok_or("timed out waiting for AVDECC Proxy entity ID response")?;
+            let frame = self
+                .read_frame(remaining)?
+                .ok_or("timed out waiting for AVDECC Proxy entity ID response")?;
+            let is_response =
+                frame.message_type == APP_ENTITY_ID_RESPONSE && frame.address == primary_mac;
+            frames.push(frame.clone());
+            if is_response {
+                if frame.reserved != 0 {
+                    return Ok(EntityIdResult {
+                        entity_id: None,
+                        reserved: Some(frame.reserved),
+                        frames,
+                    });
+                }
+                let entity_id: [u8; 8] = frame
+                    .payload
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| "invalid AVDECC Proxy entity ID response length")?;
+                return Ok(EntityIdResult {
+                    entity_id: Some(u64::from_be_bytes(entity_id)),
+                    reserved: Some(0),
+                    frames,
+                });
+            }
+        }
+    }
+
+    fn read_frame(&mut self, timeout: Duration) -> Result<Option<AppFrame>, String> {
+        let Some(header) = self.read_exact_or_timeout(APP_HEADER_LEN, timeout)? else {
+            return Ok(None);
+        };
+        let payload_len = u16::from_be_bytes([header[2], header[3]]) as usize;
+        if payload_len > APP_MAX_PAYLOAD_LEN {
+            return Err(format!(
+                "AVDECC Proxy frame payload exceeds {APP_MAX_PAYLOAD_LEN} byte limit"
+            ));
+        }
+        let payload = self
+            .read_exact_or_timeout(payload_len, timeout)?
+            .ok_or("timed out while reading AVDECC Proxy frame payload")?;
+        decode_app_frame(&header, payload).map(Some)
+    }
+
+    fn read_exact_or_timeout(
+        &mut self,
+        length: usize,
+        timeout: Duration,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let started = Instant::now();
+        let mut output = Vec::with_capacity(length);
+        while output.len() < length {
+            if !self.buffered.is_empty() {
+                let take = (length - output.len()).min(self.buffered.len());
+                output.extend(self.buffered.drain(..take));
+                continue;
+            }
+            let remaining = timeout
+                .checked_sub(started.elapsed())
+                .ok_or_else(|| timeout_error(&output, length))?;
+            self.stream
+                .set_read_timeout(Some(remaining))
+                .map_err(|error| format!("set AVDECC Proxy read timeout failed: {error}"))?;
+            let mut buffer = [0u8; 1536];
+            match self.stream.read(&mut buffer) {
+                Ok(0) => return Err("AVDECC Proxy closed the tunnel".to_string()),
+                Ok(count) => self.buffered.extend_from_slice(&buffer[..count]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    return if output.is_empty() {
+                        Ok(None)
+                    } else {
+                        Err(timeout_error(&output, length))
+                    };
+                }
+                Err(error) => return Err(format!("read AVDECC Proxy tunnel failed: {error}")),
+            }
+        }
+        Ok(Some(output))
+    }
 }
 
-fn hex_preview(bytes: &[u8], maximum: usize) -> String {
-    bytes
-        .iter()
-        .take(maximum)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+fn timeout_error(received: &[u8], expected: usize) -> String {
+    if received.is_empty() {
+        "timed out waiting for AVDECC Proxy frame".to_string()
+    } else {
+        format!(
+            "timed out while reading AVDECC Proxy frame: received {} of {expected} bytes ({})",
+            received.len(),
+            hex_preview(received, 32)
+        )
+    }
 }
 
 fn read_connect_response(
@@ -198,6 +371,9 @@ fn decode_app_frame(header: &[u8], payload: Vec<u8>) -> Result<AppFrame, String>
     if header.len() != APP_HEADER_LEN {
         return Err("invalid AVDECC Proxy frame header length".to_string());
     }
+    if !is_known_v0_message_type(header[1]) {
+        return Err("invalid AVDECC Proxy frame message type".to_string());
+    }
     let payload_len = u16::from_be_bytes([header[2], header[3]]) as usize;
     if payload.len() != payload_len {
         return Err("invalid AVDECC Proxy frame payload length".to_string());
@@ -205,12 +381,28 @@ fn decode_app_frame(header: &[u8], payload: Vec<u8>) -> Result<AppFrame, String>
     let address: [u8; 6] = header[4..10]
         .try_into()
         .map_err(|_| "invalid AVDECC Proxy frame address")?;
+    let reserved = u16::from_be_bytes([header[10], header[11]]);
     Ok(AppFrame {
         version: header[0],
         message_type: header[1],
         address,
+        reserved,
         payload,
     })
+}
+
+fn is_known_v0_message_type(message_type: u8) -> bool {
+    matches!(
+        message_type,
+        APP_NOP
+            | APP_ENTITY_ID_REQUEST
+            | APP_ENTITY_ID_RESPONSE
+            | APP_LINK_UP
+            | APP_LINK_DOWN
+            | APP_AVDECC_FROM_APS
+            | APP_AVDECC_FROM_APC
+            | 0xff
+    )
 }
 
 fn decode_complete_v0_frames(bytes: &[u8]) -> Vec<AppFrame> {
@@ -233,127 +425,29 @@ fn decode_complete_v0_frames(bytes: &[u8]) -> Vec<AppFrame> {
     frames
 }
 
-struct ProxyAddress {
-    host_header: String,
-    socket_address: String,
-}
-
-fn parse_proxy_address(host: &str) -> Result<ProxyAddress, String> {
-    let host = host
-        .strip_prefix("http://")
-        .unwrap_or(host)
-        .trim_end_matches('/');
-    if host.is_empty()
-        || host.contains(['/', '?', '#'])
-        || host
-            .chars()
-            .any(|character| character.is_whitespace() || character.is_control())
+fn read_interface_mac(interface: &str) -> Result<[u8; 6], String> {
+    if interface.is_empty()
+        || !interface.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
     {
-        return Err("invalid AVDECC Proxy host".to_string());
+        return Err("interface name contains unsupported characters".to_string());
     }
-    if let Some(rest) = host.strip_prefix('[') {
-        let closing = rest
-            .find(']')
-            .ok_or("unterminated bracketed IPv6 AVDECC Proxy host")?;
-        let address = &rest[..closing];
-        address
-            .parse::<Ipv6Addr>()
-            .map_err(|_| "invalid bracketed IPv6 AVDECC Proxy host")?;
-        let suffix = &rest[closing + 1..];
-        let port = if suffix.is_empty() {
-            17221
-        } else {
-            suffix
-                .strip_prefix(':')
-                .ok_or("invalid bracketed IPv6 AVDECC Proxy host")?
-                .parse::<u16>()
-                .map_err(|_| "invalid AVDECC Proxy port")?
-        };
-        return Ok(ProxyAddress {
-            host_header: format!("[{address}]:{port}"),
-            socket_address: format!("[{address}]:{port}"),
-        });
-    }
-    if host.parse::<Ipv6Addr>().is_ok() {
-        return Ok(ProxyAddress {
-            host_header: format!("[{host}]:17221"),
-            socket_address: format!("[{host}]:17221"),
-        });
-    }
-    if let Some((name, port)) = host.rsplit_once(':') {
-        if name.is_empty() || port.parse::<u16>().is_err() {
-            return Err("invalid AVDECC Proxy host; expected host or host:port".to_string());
-        }
-        return Ok(ProxyAddress {
-            host_header: host.to_string(),
-            socket_address: host.to_string(),
-        });
-    }
-    Ok(ProxyAddress {
-        host_header: format!("{host}:17221"),
-        socket_address: format!("{host}:17221"),
-    })
+    let value = std::fs::read_to_string(format!("/sys/class/net/{interface}/address"))
+        .map_err(|error| format!("read MAC address for {interface} failed: {error}"))?;
+    parse_mac_address(value.trim())
 }
 
-fn validate_proxy_path(path: &str) -> Result<(), String> {
-    if path.is_empty()
-        || !path.starts_with('/')
-        || path.starts_with("//")
-        || path
-            .chars()
-            .any(|character| character.is_whitespace() || character.is_control())
-    {
-        return Err("AVDECC Proxy path must be a whitespace-free origin path".to_string());
+fn parse_mac_address(value: &str) -> Result<[u8; 6], String> {
+    let parts = value.split(':').collect::<Vec<_>>();
+    if parts.len() != 6 {
+        return Err("MAC address must contain six octets".to_string());
     }
-    Ok(())
-}
-
-fn connect_with_timeout(address: &str, timeout: Duration) -> Result<TcpStream, String> {
-    let addresses = address
-        .to_socket_addrs()
-        .map_err(|error| format!("resolve AVDECC Proxy {address} failed: {error}"))?
-        .collect::<Vec<_>>();
-    let mut last_error = None;
-    for address in addresses {
-        match TcpStream::connect_timeout(&address, timeout) {
-            Ok(stream) => return Ok(stream),
-            Err(error) => last_error = Some(error),
-        }
+    let mut address = [0; 6];
+    for (index, part) in parts.iter().enumerate() {
+        address[index] = u8::from_str_radix(part, 16).map_err(|_| "invalid MAC address")?;
     }
-    let error = last_error.ok_or("AVDECC Proxy host resolved to no addresses")?;
-    Err(format!("connect AVDECC Proxy {address} failed: {error}"))
-}
-
-fn app_frame_json(frame: &AppFrame) -> String {
-    let address = frame
-        .address
-        .iter()
-        .map(|octet| format!("{octet:02x}"))
-        .collect::<Vec<_>>()
-        .join(":");
-    let payload_preview = hex_preview(&frame.payload, 48);
-    format!(
-        "{{\"version\":{},\"message_type\":\"{}\",\"address\":\"{}\",\"payload_bytes\":{},\"payload_preview\":\"{}\"}}",
-        frame.version,
-        app_message_type_name(frame.message_type),
-        address,
-        frame.payload.len(),
-        payload_preview
-    )
-}
-
-fn app_message_type_name(message_type: u8) -> &'static str {
-    match message_type {
-        APP_NOP => "nop",
-        APP_ENTITY_GUID_REQUEST => "entity_guid_request",
-        APP_ENTITY_GUID_RESPONSE => "entity_guid_response",
-        APP_LINK_UP => "link_up",
-        APP_LINK_DOWN => "link_down",
-        APP_AVDECC_FROM_APS => "avdecc_from_aps",
-        APP_AVDECC_FROM_APC => "avdecc_from_apc",
-        0xff => "vendor",
-        _ => "unknown",
-    }
+    Ok(address)
 }
 
 #[cfg(test)]

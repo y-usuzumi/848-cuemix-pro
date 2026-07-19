@@ -23,7 +23,12 @@ pub(crate) fn run() -> Result<(), String> {
         "avdecc-probe" => {
             let host = args.next().ok_or("missing AVDECC Proxy host")?;
             let options = AvdeccProbeOptions::parse(args.collect())?;
-            write_probe_result(&probe_avdecc(&host, &options.path, options.timeout)?);
+            write_probe_result(&probe_avdecc(
+                &host,
+                &options.path,
+                options.request_entity_id.as_deref(),
+                options.timeout,
+            )?);
         }
         "probe" => {
             let host = args.next().ok_or("missing device host")?;
@@ -75,7 +80,7 @@ fn print_usage() {
         "cuemix-848\n\n\
          Usage:\n\
            cuemix-848 discover [--timeout-ms n]\n\
-           cuemix-848 avdecc-probe <host> [--path /] [--timeout-ms n]\n\
+           cuemix-848 avdecc-probe <host> [--path /] [--request-entity-id interface] [--timeout-ms n]\n\
            cuemix-848 probe <host> [--save file] [--timeout-ms n]\n\
            cuemix-848 get <host> <path> [--save file] [--timeout-ms n]\n\
            cuemix-848 set <host> <datastore-path> <value> [--method POST|PATCH] [--timeout-ms n]\n\
@@ -116,12 +121,14 @@ struct ReadOptions {
 struct AvdeccProbeOptions {
     timeout: Duration,
     path: String,
+    request_entity_id: Option<String>,
 }
 
 impl AvdeccProbeOptions {
     fn parse(args: Vec<String>) -> Result<Self, String> {
         let mut timeout = Duration::from_millis(2500);
         let mut path = "/".to_string();
+        let mut request_entity_id = None;
         let mut index = 0;
         while index < args.len() {
             match args[index].as_str() {
@@ -132,6 +139,14 @@ impl AvdeccProbeOptions {
                         .ok_or("missing value for --path")?
                         .to_string();
                 }
+                "--request-entity-id" => {
+                    index += 1;
+                    request_entity_id = Some(
+                        args.get(index)
+                            .ok_or("missing interface for --request-entity-id")?
+                            .to_string(),
+                    );
+                }
                 "--timeout-ms" => {
                     index += 1;
                     timeout = parse_timeout(args.get(index))?;
@@ -140,7 +155,11 @@ impl AvdeccProbeOptions {
             }
             index += 1;
         }
-        Ok(Self { timeout, path })
+        Ok(Self {
+            timeout,
+            path,
+            request_entity_id,
+        })
     }
 }
 
