@@ -2,6 +2,7 @@ use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::avdecc::{probe as probe_avdecc, write_probe_result};
 use crate::device::{datastore_write_request, DeviceClient, HttpResponse};
 use crate::discovery::{discover_avdecc, write_discovery_results};
 use crate::probe::{probe_device, write_probe_results};
@@ -18,6 +19,11 @@ pub(crate) fn run() -> Result<(), String> {
         "discover" => {
             let options = CommonOptions::parse(args.collect())?;
             write_discovery_results(&discover_avdecc(options.timeout)?);
+        }
+        "avdecc-probe" => {
+            let host = args.next().ok_or("missing AVDECC Proxy host")?;
+            let options = AvdeccProbeOptions::parse(args.collect())?;
+            write_probe_result(&probe_avdecc(&host, &options.path, options.timeout)?);
         }
         "probe" => {
             let host = args.next().ok_or("missing device host")?;
@@ -69,6 +75,7 @@ fn print_usage() {
         "cuemix-848\n\n\
          Usage:\n\
            cuemix-848 discover [--timeout-ms n]\n\
+           cuemix-848 avdecc-probe <host> [--path /] [--timeout-ms n]\n\
            cuemix-848 probe <host> [--save file] [--timeout-ms n]\n\
            cuemix-848 get <host> <path> [--save file] [--timeout-ms n]\n\
            cuemix-848 set <host> <datastore-path> <value> [--method POST|PATCH] [--timeout-ms n]\n\
@@ -104,6 +111,37 @@ impl CommonOptions {
 struct ReadOptions {
     timeout: Duration,
     save: Option<PathBuf>,
+}
+
+struct AvdeccProbeOptions {
+    timeout: Duration,
+    path: String,
+}
+
+impl AvdeccProbeOptions {
+    fn parse(args: Vec<String>) -> Result<Self, String> {
+        let mut timeout = Duration::from_millis(2500);
+        let mut path = "/".to_string();
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--path" => {
+                    index += 1;
+                    path = args
+                        .get(index)
+                        .ok_or("missing value for --path")?
+                        .to_string();
+                }
+                "--timeout-ms" => {
+                    index += 1;
+                    timeout = parse_timeout(args.get(index))?;
+                }
+                other => return Err(format!("unknown option '{other}'")),
+            }
+            index += 1;
+        }
+        Ok(Self { timeout, path })
+    }
 }
 
 impl ReadOptions {

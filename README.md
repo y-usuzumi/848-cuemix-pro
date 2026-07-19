@@ -36,6 +36,19 @@ Discovery uses a native IPv4 mDNS query and also merges results from the
 standard Linux `avahi-browse` utility when it is installed. Avahi is currently
 needed to discover IPv6-only advertisements.
 
+Validate an advertised AVDECC Proxy endpoint without sending an AVDECC or
+device-control command:
+
+```sh
+cargo run -- avdecc-probe 192.168.1.50
+```
+
+This only opens the proxy's HTTP `CONNECT` tunnel, listens briefly for data,
+and prints a bounded JSON summary. It decodes complete version-0 proxy frames
+when present, but preserves all received bytes as a hex preview. The current
+848 advertises proxy protocol version 1; this app does not yet transmit the
+version-1 handshake or any AECP descriptor command.
+
 An 848 directly attached to this Linux machine may advertise only IPv6. In that
 case, use bracket notation, for example `"[2604:4080:1503:8036::1]"`.
 

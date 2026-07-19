@@ -1,3 +1,4 @@
+mod avdecc;
 mod cli;
 mod device;
 mod discovery;

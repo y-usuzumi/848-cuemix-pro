@@ -9,6 +9,7 @@ and is served by the same binary.
 ## Layout
 
 - `src/cli.rs`: command-line parsing and output.
+- `src/avdecc.rs`: bounded AVDECC Proxy tunnel inspection.
 - `src/device.rs`: HTTP client, response decoding, form-body generation, and
   shared escaping helpers.
 - `src/discovery.rs`: mDNS and Avahi AVDECC discovery.
