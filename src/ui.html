@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>cuemix-848</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f7f4;
+      --ink: #171916;
+      --muted: #5a6157;
+      --panel: #ffffff;
+      --line: #cfd8c8;
+      --accent: #1f7a5f;
+      --warn: #9f3f24;
+      --code: #101412;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #121512;
+        --ink: #f4f6f1;
+        --muted: #a8b0a4;
+        --panel: #1c211d;
+        --line: #394238;
+        --accent: #60c1a1;
+        --warn: #ff9b78;
+        --code: #070907;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--ink);
+      font: 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header, main { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; }
+    header { padding: 22px 0 14px; display: flex; align-items: end; justify-content: space-between; gap: 16px; }
+    h1 { font-size: 22px; margin: 0; font-weight: 720; }
+    .sub { color: var(--muted); margin-top: 4px; }
+    .toolbar {
+      display: grid;
+      grid-template-columns: minmax(180px, 260px) minmax(220px, 1fr) minmax(110px, 150px) minmax(100px, 120px) auto auto;
+      gap: 8px;
+      align-items: end;
+      padding: 14px 0;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+    label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+    input, select, button, textarea {
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: var(--panel);
+      color: var(--ink);
+      font: inherit;
+    }
+    button {
+      cursor: pointer;
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+    button.secondary { background: transparent; color: var(--ink); border-color: var(--line); }
+    main { padding-bottom: 28px; }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-top: 16px;
+      align-items: start;
+    }
+    .preamp, .outputs { margin-top: 16px; }
+    .preamp-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .output-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .output-grid .strip { gap: 8px; }
+    .strip {
+      min-width: 0;
+      display: grid;
+      gap: 12px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+    }
+    .strip-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+    .strip-head strong { font-size: 15px; }
+    .gain-value { color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 700; }
+    .strip input[type="range"] { min-height: auto; width: 100%; padding: 0; accent-color: var(--accent); }
+    .strip-name input { width: 100%; }
+    .switches { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+    .switch {
+      display: flex;
+      min-height: 32px;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .switch input { min-height: auto; width: 15px; height: 15px; margin: 0; padding: 0; accent-color: var(--accent); }
+    .strip-status { min-height: 17px; color: var(--muted); font-size: 12px; }
+    .strip-status.pending, .strip-status.saved { color: var(--accent); }
+    .strip-status.error { color: var(--warn); }
+    .empty { color: var(--muted); padding: 12px 0; }
+    section {
+      min-width: 0;
+      border-top: 2px solid var(--line);
+      padding-top: 12px;
+    }
+    h2 { margin: 0 0 10px; font-size: 14px; text-transform: uppercase; letter-spacing: 0; color: var(--muted); }
+    .row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+    .row input { flex: 1; min-width: 0; }
+    pre {
+      margin: 0;
+      padding: 12px;
+      min-height: 280px;
+      max-height: 58vh;
+      overflow: auto;
+      background: var(--code);
+      color: #e8f0e8;
+      border-radius: 6px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    table { width: 100%; border-collapse: collapse; background: var(--panel); }
+    th, td { border-bottom: 1px solid var(--line); padding: 8px; text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-size: 12px; font-weight: 700; }
+    td.path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; width: 36%; }
+    td.preview { overflow-wrap: anywhere; }
+    .ok { color: var(--accent); font-weight: 700; }
+    .bad { color: var(--warn); font-weight: 700; }
+    @media (max-width: 850px) {
+      .toolbar, .grid { grid-template-columns: 1fr; }
+      .preamp-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .output-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      header { display: block; }
+    }
+    @media (max-width: 480px) {
+      .preamp-grid, .output-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>cuemix-848</h1>
+      <div class="sub">Linux control surface for MOTU 848 / CueMix Pro</div>
+    </div>
+  </header>
+  <main>
+    <div class="toolbar">
+      <label>Device host<input id="host" value="__DEFAULT_HOST__" readonly spellcheck="false"></label>
+      <label>Path<input id="path" value="/datastore/ext/ibank/0" spellcheck="false"></label>
+      <label>Value<input id="value" value="-12" spellcheck="false"></label>
+      <label>Write method<select id="method"><option>POST</option><option>PATCH</option></select></label>
+      <button id="get">Read</button>
+      <button id="set" class="secondary">Write</button>
+    </div>
+    <section class="preamp">
+      <div class="row">
+        <h2 style="flex: 1">Mic Preamps</h2>
+        <button id="loadPreamps" class="secondary">Refresh</button>
+      </div>
+      <div id="preampOut" class="preamp-grid"><div class="empty">Loading...</div></div>
+    </section>
+    <section class="outputs">
+      <div class="row">
+        <h2 style="flex: 1">Analog Output Gains</h2>
+        <button id="loadOutputs" class="secondary">Refresh</button>
+      </div>
+      <div id="outputOut" class="output-grid"><div class="empty">Loading...</div></div>
+    </section>
+    <div class="grid">
+      <section>
+        <div class="row">
+          <h2 style="flex: 1">Probe</h2>
+          <button id="probe" class="secondary">Run Probe</button>
+        </div>
+        <div id="probeOut"></div>
+      </section>
+      <section>
+        <h2>Response</h2>
+        <pre id="response">Ready.</pre>
+      </section>
+    </div>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const qs = (params) => new URLSearchParams(params).toString();
+    const preampPath = '/datastore/ext/ibank/0';
+    const outputPath = '/datastore/ext/obank/0';
+    const sessionToken = '__SESSION_TOKEN__';
+    const pendingWrites = new Set();
+    let preampCount = 0;
+    let outputCount = 0;
+    let preampRefreshInFlight = false;
+    let outputRefreshInFlight = false;
+    const show = (value) => {
+      $('response').textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+    };
+    async function fetchJson(resource, options) {
+      const response = await fetch(resource, options);
+      const json = await response.json();
+      if (!response.ok || json.error) throw new Error(json.error || `Server returned HTTP ${response.status}`);
+      return json;
+    }
+    async function readPath() {
+      try {
+        const json = await fetchJson('/api/get?' + qs({ host: $('host').value, path: $('path').value }));
+        show(json.body ?? json);
+      } catch (err) {
+        show({ error: err.message });
+      }
+    }
+    async function setPath() {
+      try {
+        const json = await fetchJson('/api/set', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: qs({ host: $('host').value, path: $('path').value, value: $('value').value, method: $('method').value, token: sessionToken })
+        });
+        show(json.body ?? json);
+      } catch (err) {
+        show({ error: err.message });
+      }
+    }
+    async function loadPreamps({ quiet = false } = {}) {
+      if (preampRefreshInFlight) return;
+      preampRefreshInFlight = true;
+      if (!quiet && !preampCount) $('preampOut').innerHTML = '<div class="empty">Loading...</div>';
+      try {
+        const json = await fetchJson('/api/get?' + qs({ host: $('host').value, path: preampPath }));
+        const data = JSON.parse(json.body);
+        const count = Math.min(4, Number(data.maxCh || 0));
+        if (!count) throw new Error('No mic preamps exposed by this device.');
+        if (count !== preampCount || !$('preampOut').querySelector('.strip')) {
+          $('preampOut').innerHTML = Array.from({ length: count }, (_, index) => preampMarkup(index, data)).join('');
+          preampCount = count;
+          for (let index = 0; index < count; index += 1) bindPreamp(index);
+        } else {
+          for (let index = 0; index < count; index += 1) syncPreamp(index, data);
+        }
+      } catch (err) {
+        if (!quiet || !preampCount) {
+          $('preampOut').innerHTML = `<div class="empty">${escapeHtml(err.message)}</div>`;
+          show({ error: err.message });
+        }
+      } finally {
+        preampRefreshInFlight = false;
+      }
+    }
+    function syncPreamp(index, data) {
+      const key = (field) => `ch/${index}/${field}`;
+      syncPreampText(index, 'name', data[key('name')] || '');
+      syncPreampGain(index, Number(data[key('trim')] ?? 0));
+      for (const field of ['48V', 'pad', 'phase']) {
+        const path = preampFieldPath(index, field);
+        const input = $(`mic-${index}-${field}`);
+        if (input && canSyncField(input, path)) input.checked = Boolean(Number(data[key(field)]));
+      }
+    }
+    function syncPreampText(index, field, value) {
+      const path = preampFieldPath(index, field);
+      const input = $(`mic-${index}-${field}`);
+      if (input && canSyncField(input, path)) input.value = value;
+    }
+    function syncPreampGain(index, value) {
+      const path = preampFieldPath(index, 'trim');
+      const input = $(`mic-${index}-gain`);
+      if (!input || !canSyncField(input, path)) return;
+      input.value = value;
+      $(`mic-${index}-gain-value`).textContent = `${input.value} dB`;
+    }
+    function canSyncField(input, path) {
+      return !pendingWrites.has(path) && document.activeElement !== input && !input.matches(':active');
+    }
+    function preampMarkup(index, data) {
+      const key = (field) => `ch/${index}/${field}`;
+      const gain = Number(data[key('trim')] ?? 0);
+      const range = String(data[key('trimRange')] || '0:74').split(':').map(Number);
+      const min = Number.isFinite(range[0]) ? range[0] : 0;
+      const max = Number.isFinite(range[1]) ? range[1] : 74;
+      const name = data[key('name')] || '';
+      return `<article class="strip">
+        <div class="strip-head"><strong>Mic ${index + 1}</strong><output class="gain-value" id="mic-${index}-gain-value">${gain} dB</output></div>
+        <label class="strip-name">Name<input id="mic-${index}-name" value="${escapeHtml(name)}" placeholder="Mic ${index + 1}" spellcheck="false"></label>
+        <label>Gain<input id="mic-${index}-gain" type="range" min="${min}" max="${max}" step="1" value="${gain}"></label>
+        <div class="switches">
+          ${switchMarkup(index, '48V', '48 V', data[key('48V')])}
+          ${switchMarkup(index, 'pad', 'Pad', data[key('pad')])}
+          ${switchMarkup(index, 'phase', 'Polarity', data[key('phase')])}
+        </div>
+        <div class="strip-status" id="mic-${index}-status" aria-live="polite"></div>
+      </article>`;
+    }
+    function switchMarkup(index, field, label, value) {
+      const checked = Number(value) ? ' checked' : '';
+      return `<label class="switch"><input id="mic-${index}-${field}" type="checkbox"${checked}><span>${label}</span></label>`;
+    }
+    function preampFieldPath(index, field) {
+      return `${preampPath}/ch/${index}/${field}`;
+    }
+    function bindPreamp(index) {
+      const path = (field) => preampFieldPath(index, field);
+      const gain = $(`mic-${index}-gain`);
+      const gainValue = $(`mic-${index}-gain-value`);
+      const status = $(`mic-${index}-status`);
+      const saveGain = debounce((value) => writeDatastore(path('trim'), value, status), 180);
+      gain.addEventListener('input', () => {
+        gainValue.textContent = `${gain.value} dB`;
+        saveGain(gain.value);
+      });
+      gain.addEventListener('change', () => saveGain.flush(gain.value));
+      $(`mic-${index}-name`).addEventListener('change', (event) => writeDatastore(path('name'), event.target.value, status));
+      for (const field of ['48V', 'pad', 'phase']) {
+        $(`mic-${index}-${field}`).addEventListener('change', (event) => writeDatastore(path(field), event.target.checked ? '1' : '0', status));
+      }
+    }
+    async function loadOutputs({ quiet = false } = {}) {
+      if (outputRefreshInFlight) return;
+      outputRefreshInFlight = true;
+      if (!quiet && !outputCount) $('outputOut').innerHTML = '<div class="empty">Loading...</div>';
+      try {
+        const json = await fetchJson('/api/get?' + qs({ host: $('host').value, path: outputPath }));
+        const data = JSON.parse(json.body);
+        const count = Math.min(12, Number(data.maxCh || 0));
+        if (!count) throw new Error('No analog output gains exposed by this device.');
+        if (count !== outputCount || !$('outputOut').querySelector('.strip')) {
+          $('outputOut').innerHTML = Array.from({ length: count }, (_, index) => outputMarkup(index, data)).join('');
+          outputCount = count;
+          for (let index = 0; index < count; index += 1) bindOutput(index);
+        } else {
+          for (let index = 0; index < count; index += 1) syncOutput(index, data);
+        }
+      } catch (err) {
+        if (!quiet || !outputCount) {
+          $('outputOut').innerHTML = `<div class="empty">${escapeHtml(err.message)}</div>`;
+          show({ error: err.message });
+        }
+      } finally {
+        outputRefreshInFlight = false;
+      }
+    }
+    function outputMarkup(index, data) {
+      const key = (field) => `ch/${index}/${field}`;
+      const gain = Number(data[key('trim')] ?? 0);
+      const range = String(data[key('trimRange')] || '-99:0').split(':').map(Number);
+      const min = Number.isFinite(range[0]) ? range[0] : -99;
+      const max = Number.isFinite(range[1]) ? range[1] : 0;
+      return `<article class="strip">
+        <div class="strip-head"><strong>Out ${index + 1}</strong><output class="gain-value" id="out-${index}-gain-value">${gain} dB</output></div>
+        <label>Gain<input id="out-${index}-gain" type="range" min="${min}" max="${max}" step="1" value="${gain}"></label>
+        <div class="strip-status" id="out-${index}-status" aria-live="polite"></div>
+      </article>`;
+    }
+    function outputFieldPath(index, field) {
+      return `${outputPath}/ch/${index}/${field}`;
+    }
+    function bindOutput(index) {
+      const path = (field) => outputFieldPath(index, field);
+      const gain = $(`out-${index}-gain`);
+      const gainValue = $(`out-${index}-gain-value`);
+      const status = $(`out-${index}-status`);
+      const saveGain = debounce((value) => writeDatastore(path('trim'), value, status), 180);
+      gain.addEventListener('input', () => {
+        gainValue.textContent = `${gain.value} dB`;
+        saveGain(gain.value);
+      });
+      gain.addEventListener('change', () => saveGain.flush(gain.value));
+    }
+    function syncOutput(index, data) {
+      const path = outputFieldPath(index, 'trim');
+      const input = $(`out-${index}-gain`);
+      if (!input || !canSyncField(input, path)) return;
+      input.value = Number(data[`ch/${index}/trim`] ?? 0);
+      $(`out-${index}-gain-value`).textContent = `${input.value} dB`;
+    }
+    function debounce(callback, delay) {
+      let timer = null;
+      let pendingArgs;
+      const invoke = () => {
+        timer = null;
+        const args = pendingArgs;
+        pendingArgs = undefined;
+        callback(...args);
+      };
+      const schedule = (...args) => {
+        pendingArgs = args;
+        clearTimeout(timer);
+        timer = setTimeout(invoke, delay);
+      };
+      schedule.flush = (...args) => {
+        if (timer === null) return;
+        pendingArgs = args;
+        clearTimeout(timer);
+        invoke();
+      };
+      return schedule;
+    }
+    function setStripStatus(element, message, state) {
+      if (!element) return;
+      element.textContent = message;
+      element.className = `strip-status ${state || ''}`;
+    }
+    async function writeDatastore(path, value, status) {
+      setStripStatus(status, 'Saving...', 'pending');
+      pendingWrites.add(path);
+      try {
+        const json = await fetchJson('/api/set', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: qs({ host: $('host').value, path, value, method: 'POST', token: sessionToken })
+        });
+        if (json.status >= 400) throw new Error(`Device returned HTTP ${json.status}`);
+        setStripStatus(status, 'Saved', 'saved');
+        show(json.body ?? json);
+      } catch (err) {
+        setStripStatus(status, 'Save failed', 'error');
+        show({ error: err.message });
+      } finally {
+        pendingWrites.delete(path);
+      }
+    }
+    async function probe() {
+      $('probeOut').textContent = 'Probing...';
+      try {
+        const rows = await fetchJson('/api/probe?' + qs({ host: $('host').value }));
+        $('probeOut').innerHTML = '<table><thead><tr><th>Path</th><th>Status</th><th>Bytes</th><th>Preview</th></tr></thead><tbody>' +
+          rows.map(row => `<tr>
+            <td class="path">${escapeHtml(row.path)}</td>
+            <td class="${row.status && row.status < 400 ? 'ok' : 'bad'}">${row.status ?? 'err'}</td>
+            <td>${row.bytes}</td>
+            <td class="preview">${escapeHtml(row.error || row.preview || '')}</td>
+          </tr>`).join('') + '</tbody></table>';
+        show(rows.filter(row => row.status && row.status < 400));
+      } catch (err) {
+        $('probeOut').textContent = 'Probe failed.';
+        show({ error: err.message });
+      }
+    }
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
+    $('get').addEventListener('click', readPath);
+    $('set').addEventListener('click', setPath);
+    $('probe').addEventListener('click', probe);
+    $('loadPreamps').addEventListener('click', loadPreamps);
+    $('loadOutputs').addEventListener('click', loadOutputs);
+    $('host').addEventListener('change', () => {
+      preampCount = 0;
+      outputCount = 0;
+      loadPreamps();
+      loadOutputs();
+    });
+    // HTTP has no verified push subscription yet, so polling is the recovery
+    // path for physical-panel and other-client changes.
+    setInterval(() => {
+      if (!document.hidden) {
+        loadPreamps({ quiet: true });
+        loadOutputs({ quiet: true });
+      }
+    }, 750);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) {
+        loadPreamps({ quiet: true });
+        loadOutputs({ quiet: true });
+      }
+    });
+    loadPreamps();
+    loadOutputs();
+  </script>
+</body>
+</html>

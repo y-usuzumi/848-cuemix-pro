@@ -1,0 +1,8 @@
+[package]
+name = "cuemix-848"
+version = "0.1.0"
+edition = "2021"
+description = "Linux-first control/probing app for MOTU 848 and CueMix Pro HTTP surfaces"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
