@@ -252,15 +252,20 @@ fn find_bytes(haystack: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
 
 fn normalize_path(path: &str) -> Result<String, String> {
     if path.is_empty()
-        || !path.starts_with('/')
-        || path.starts_with("//")
         || path
             .chars()
             .any(|character| character.is_control() || character.is_whitespace())
     {
         return Err("request path must be a whitespace-free origin path".to_string());
     }
-    Ok(path.to_string())
+    if path.starts_with("//") {
+        return Err("request path must not be an authority path".to_string());
+    }
+    Ok(if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    })
 }
 
 pub(crate) fn datastore_set_body(value: &str) -> String {
@@ -457,5 +462,6 @@ mod tests {
     fn rejects_request_target_injection() {
         assert!(datastore_write_request("/datastore/ext\r\nX-Test: injected", "0").is_err());
         assert!(datastore_write_request("//other-device/path", "0").is_err());
+        assert_eq!(normalize_path("apiversion"), Ok("/apiversion".to_string()));
     }
 }

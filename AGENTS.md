@@ -27,6 +27,9 @@ and is served by the same binary.
   A/B/C monitor-group mapping. Keep that work behind AVDECC descriptor mapping.
 - Polling is the UI recovery mechanism until AVDECC unsolicited notifications
   are implemented. Do not remove it merely because a write endpoint responds.
+- The loopback UI protects against cross-site browser writes. It is not a
+  security boundary against hostile processes running on the same machine,
+  which may be able to contact the 848 directly.
 
 ## Verification
 

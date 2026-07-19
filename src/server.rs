@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::device::{datastore_write_request, json_escape, percent_decode, DeviceClient};
 use crate::probe::{probe_device, probe_result_json};
@@ -19,10 +19,10 @@ pub(crate) fn serve(default_host: &str, listen: &str, timeout: Duration) -> Resu
     if !listen_address.ip().is_loopback() {
         return Err("the browser control server may only listen on a loopback address".to_string());
     }
-    let session_token = new_session_token()?;
-    let expected_origin = format!("http://{listen_address}");
     let listener = TcpListener::bind(listen_address)
         .map_err(|error| format!("listen on {listen_address} failed: {error}"))?;
+    let expected_origin = listener_origin(&listener)?;
+    let session_token = new_session_token()?;
     println!("cuemix-848 UI: {expected_origin}");
     println!("default device: {default_host}");
 
@@ -43,6 +43,17 @@ pub(crate) fn serve(default_host: &str, listen: &str, timeout: Duration) -> Resu
         }
     }
     Ok(())
+}
+
+fn listener_origin(listener: &TcpListener) -> Result<String, String> {
+    let address = listener
+        .local_addr()
+        .map_err(|error| format!("read bound address failed: {error}"))?;
+    Ok(origin_for_address(address))
+}
+
+fn origin_for_address(address: SocketAddr) -> String {
+    format!("http://{address}")
 }
 
 fn new_session_token() -> Result<String, String> {
@@ -66,7 +77,7 @@ fn handle_browser_request(
     stream
         .set_write_timeout(Some(timeout))
         .map_err(|error| format!("set browser write timeout failed: {error}"))?;
-    let request = read_browser_request(&stream);
+    let request = read_browser_request(&stream, timeout);
     let response = match request {
         Ok(request) => route_browser_request(
             &request.method,
@@ -90,9 +101,16 @@ struct BrowserRequest {
     origin: Option<String>,
 }
 
-fn read_browser_request(stream: &TcpStream) -> Result<BrowserRequest, String> {
+fn read_browser_request(stream: &TcpStream, timeout: Duration) -> Result<BrowserRequest, String> {
+    let started = Instant::now();
     let mut reader = io::BufReader::new(stream.try_clone().map_err(|error| error.to_string())?);
-    let first_line = read_limited_line(&mut reader, MAX_REQUEST_LINE_BYTES, "request line")?;
+    let first_line = read_limited_line(
+        &mut reader,
+        MAX_REQUEST_LINE_BYTES,
+        "request line",
+        started,
+        timeout,
+    )?;
     let mut parts = first_line.split_whitespace();
     let method = parts.next().ok_or("missing HTTP method")?.to_string();
     let target = parts.next().ok_or("missing request target")?.to_string();
@@ -104,7 +122,13 @@ fn read_browser_request(stream: &TcpStream) -> Result<BrowserRequest, String> {
     let mut content_length = None;
     let mut origin = None;
     loop {
-        let line = read_limited_line(&mut reader, MAX_REQUEST_LINE_BYTES, "request header")?;
+        let line = read_limited_line(
+            &mut reader,
+            MAX_REQUEST_LINE_BYTES,
+            "request header",
+            started,
+            timeout,
+        )?;
         header_bytes = header_bytes
             .checked_add(line.len())
             .ok_or("browser request header size overflow")?;
@@ -136,13 +160,7 @@ fn read_browser_request(stream: &TcpStream) -> Result<BrowserRequest, String> {
         }
     }
 
-    let mut body = vec![0u8; content_length.unwrap_or(0)];
-    if !body.is_empty() {
-        reader
-            .read_exact(&mut body)
-            .map_err(|error| format!("read browser request body failed: {error}"))?;
-    }
-    let body = String::from_utf8(body).map_err(|_| "browser request body must be UTF-8")?;
+    let body = read_browser_body(&mut reader, content_length.unwrap_or(0), started, timeout)?;
     Ok(BrowserRequest {
         method,
         target,
@@ -155,13 +173,17 @@ fn read_limited_line(
     reader: &mut impl BufRead,
     max_bytes: usize,
     description: &str,
+    started: Instant,
+    timeout: Duration,
 ) -> Result<String, String> {
     let mut line = Vec::new();
     loop {
+        check_request_deadline(started, timeout)?;
         let (take, found_newline) = {
             let buffer = reader
                 .fill_buf()
                 .map_err(|error| format!("read {description} failed: {error}"))?;
+            check_request_deadline(started, timeout)?;
             if buffer.is_empty() {
                 return Err(format!("unexpected end of {description}"));
             }
@@ -182,6 +204,36 @@ fn read_limited_line(
         if found_newline {
             return String::from_utf8(line).map_err(|_| format!("{description} must be UTF-8"));
         }
+    }
+}
+
+fn read_browser_body(
+    reader: &mut impl Read,
+    length: usize,
+    started: Instant,
+    timeout: Duration,
+) -> Result<String, String> {
+    let mut body = vec![0u8; length];
+    let mut cursor = 0;
+    while cursor < body.len() {
+        check_request_deadline(started, timeout)?;
+        let count = reader
+            .read(&mut body[cursor..])
+            .map_err(|error| format!("read browser request body failed: {error}"))?;
+        check_request_deadline(started, timeout)?;
+        if count == 0 {
+            return Err("unexpected end of browser request body".to_string());
+        }
+        cursor += count;
+    }
+    String::from_utf8(body).map_err(|_| "browser request body must be UTF-8".to_string())
+}
+
+fn check_request_deadline(started: Instant, timeout: Duration) -> Result<(), String> {
+    if started.elapsed() > timeout {
+        Err("browser request exceeded overall timeout".to_string())
+    } else {
+        Ok(())
     }
 }
 
@@ -394,44 +446,5 @@ fn parse_query(input: &str) -> HashMap<String, String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn authorizes_only_the_local_page_with_its_session_token() {
-        let token = "0123456789abcdef";
-        assert!(is_authorized(
-            Some("http://127.0.0.1:8480"),
-            Some(&token.to_string()),
-            "http://127.0.0.1:8480",
-            token
-        ));
-        assert!(!is_authorized(
-            Some("https://example.test"),
-            Some(&token.to_string()),
-            "http://127.0.0.1:8480",
-            token
-        ));
-        assert!(!is_authorized(
-            Some("http://127.0.0.1:8480"),
-            Some(&"wrong".to_string()),
-            "http://127.0.0.1:8480",
-            token
-        ));
-    }
-
-    #[test]
-    fn limits_proxying_to_the_configured_device() {
-        let params = parse_query("host=192.168.4.166");
-        assert_eq!(allowed_host(&params, "192.168.4.166"), Ok("192.168.4.166"));
-        let params = parse_query("host=192.168.4.1");
-        assert!(allowed_host(&params, "192.168.4.166").is_err());
-    }
-
-    #[test]
-    fn decodes_form_queries() {
-        let params = parse_query("path=%2Fdatastore%2Fext&value=Main+out");
-        assert_eq!(params["path"], "/datastore/ext");
-        assert_eq!(params["value"], "Main out");
-    }
-}
+#[path = "server_tests.rs"]
+mod tests;

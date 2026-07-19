@@ -60,6 +60,10 @@ is scoped to the device host passed to `serve`, and each launch issues its own
 session token for write requests. Start another server instance when you need
 to control a different device.
 
+This is a browser-origin safeguard, not authentication against hostile local
+processes. Anyone with local access to the machine may also be able to reach
+the device's HTTP control service directly.
+
 The UI includes live Mic 1-4 controls for preamp name, gain, 48 V, pad, and
 polarity, plus analog output gain controls for outputs 1-12. It also keeps raw
 read, write, and probe controls for the remaining datastore surface.
