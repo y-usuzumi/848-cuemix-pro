@@ -68,6 +68,35 @@ fn parses_mac_addresses() {
 }
 
 #[test]
+fn requires_a_version_zero_entity_id_response() {
+    let frame = AppFrame {
+        version: 1,
+        message_type: APP_ENTITY_ID_RESPONSE,
+        address: [1, 2, 3, 4, 5, 6],
+        reserved: 0,
+        payload: vec![0; 8],
+    };
+    assert!(!is_entity_id_response(&frame, [1, 2, 3, 4, 5, 6]));
+}
+
+#[test]
+fn preserves_previewed_bytes_for_an_entity_id_request() {
+    let frame = AppFrame {
+        version: 0,
+        message_type: APP_LINK_UP,
+        address: [6, 5, 4, 3, 2, 1],
+        reserved: 0,
+        payload: Vec::new(),
+    };
+    let bytes = frame.encode().unwrap();
+    let mut preview = bytes[..7].to_vec();
+    let mut buffered = bytes[..7].to_vec();
+    append_preview_bytes(&mut preview, &mut buffered, &bytes[7..], true);
+    assert_eq!(preview, bytes);
+    assert_eq!(buffered, bytes);
+}
+
+#[test]
 fn rejects_unsafe_proxy_paths() {
     assert!(validate_proxy_path("/\r\nInjected: yes").is_err());
     assert!(validate_proxy_path("//other-host").is_err());

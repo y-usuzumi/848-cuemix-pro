@@ -80,7 +80,14 @@ pub(crate) fn probe(
     timeout: Duration,
 ) -> Result<AvdeccProbeResult, String> {
     let mut proxy = AvdeccProxy::connect(host, path, timeout)?;
-    let initial_data = proxy.read_available_for(timeout.min(INITIAL_FRAME_WAIT))?;
+    let preserve_initial_data = interface.is_some();
+    let initial_data =
+        proxy.read_available_for(timeout.min(INITIAL_FRAME_WAIT), preserve_initial_data)?;
+    let initial_frames = if preserve_initial_data {
+        Vec::new()
+    } else {
+        decode_complete_v0_frames(&initial_data)
+    };
     let entity_id_result = if let Some(interface) = interface {
         proxy.request_entity_id(read_interface_mac(interface)?, timeout)?
     } else {
@@ -89,7 +96,7 @@ pub(crate) fn probe(
     Ok(AvdeccProbeResult {
         status: proxy.response.status,
         reason: proxy.response.reason,
-        frames: decode_complete_v0_frames(&initial_data)
+        frames: initial_frames
             .into_iter()
             .chain(entity_id_result.frames)
             .collect(),
@@ -166,9 +173,13 @@ impl AvdeccProxy {
         })
     }
 
-    fn read_available_for(&mut self, wait: Duration) -> Result<Vec<u8>, String> {
+    fn read_available_for(&mut self, wait: Duration, preserve: bool) -> Result<Vec<u8>, String> {
         let started = Instant::now();
-        let mut data = std::mem::take(&mut self.buffered);
+        let mut data = if preserve {
+            self.buffered.clone()
+        } else {
+            std::mem::take(&mut self.buffered)
+        };
         while data.len() < INITIAL_DATA_LIMIT {
             let Some(remaining) = wait.checked_sub(started.elapsed()) else {
                 break;
@@ -180,8 +191,7 @@ impl AvdeccProxy {
             match self.stream.read(&mut buffer) {
                 Ok(0) => return Err("AVDECC Proxy closed the tunnel".to_string()),
                 Ok(count) => {
-                    let remaining_capacity = INITIAL_DATA_LIMIT - data.len();
-                    data.extend_from_slice(&buffer[..count.min(remaining_capacity)]);
+                    append_preview_bytes(&mut data, &mut self.buffered, &buffer[..count], preserve)
                 }
                 Err(error)
                     if matches!(
@@ -215,17 +225,13 @@ impl AvdeccProxy {
             .write_all(&request.encode()?)
             .map_err(|error| format!("write AVDECC Proxy entity ID request failed: {error}"))?;
 
-        let started = Instant::now();
+        let deadline = Instant::now() + timeout;
         let mut frames = Vec::new();
         loop {
-            let remaining = timeout
-                .checked_sub(started.elapsed())
-                .ok_or("timed out waiting for AVDECC Proxy entity ID response")?;
             let frame = self
-                .read_frame(remaining)?
+                .read_frame_until(deadline)?
                 .ok_or("timed out waiting for AVDECC Proxy entity ID response")?;
-            let is_response =
-                frame.message_type == APP_ENTITY_ID_RESPONSE && frame.address == primary_mac;
+            let is_response = is_entity_id_response(&frame, primary_mac);
             frames.push(frame.clone());
             if is_response {
                 if frame.reserved != 0 {
@@ -249,10 +255,16 @@ impl AvdeccProxy {
         }
     }
 
-    fn read_frame(&mut self, timeout: Duration) -> Result<Option<AppFrame>, String> {
-        let Some(header) = self.read_exact_or_timeout(APP_HEADER_LEN, timeout)? else {
+    fn read_frame_until(&mut self, deadline: Instant) -> Result<Option<AppFrame>, String> {
+        let Some(header) = self.read_exact_until(APP_HEADER_LEN, deadline)? else {
             return Ok(None);
         };
+        if header[0] != 0 {
+            return Err(format!(
+                "unsupported AVDECC Proxy frame version {}",
+                header[0]
+            ));
+        }
         let payload_len = u16::from_be_bytes([header[2], header[3]]) as usize;
         if payload_len > APP_MAX_PAYLOAD_LEN {
             return Err(format!(
@@ -260,17 +272,16 @@ impl AvdeccProxy {
             ));
         }
         let payload = self
-            .read_exact_or_timeout(payload_len, timeout)?
+            .read_exact_until(payload_len, deadline)?
             .ok_or("timed out while reading AVDECC Proxy frame payload")?;
         decode_app_frame(&header, payload).map(Some)
     }
 
-    fn read_exact_or_timeout(
+    fn read_exact_until(
         &mut self,
         length: usize,
-        timeout: Duration,
+        deadline: Instant,
     ) -> Result<Option<Vec<u8>>, String> {
-        let started = Instant::now();
         let mut output = Vec::with_capacity(length);
         while output.len() < length {
             if !self.buffered.is_empty() {
@@ -278,9 +289,20 @@ impl AvdeccProxy {
                 output.extend(self.buffered.drain(..take));
                 continue;
             }
-            let remaining = timeout
-                .checked_sub(started.elapsed())
-                .ok_or_else(|| timeout_error(&output, length))?;
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return if output.is_empty() {
+                    Ok(None)
+                } else {
+                    Err(timeout_error(&output, length))
+                };
+            };
+            if remaining.is_zero() {
+                return if output.is_empty() {
+                    Ok(None)
+                } else {
+                    Err(timeout_error(&output, length))
+                };
+            }
             self.stream
                 .set_read_timeout(Some(remaining))
                 .map_err(|error| format!("set AVDECC Proxy read timeout failed: {error}"))?;
@@ -305,6 +327,20 @@ impl AvdeccProxy {
         }
         Ok(Some(output))
     }
+}
+
+fn append_preview_bytes(data: &mut Vec<u8>, buffered: &mut Vec<u8>, bytes: &[u8], preserve: bool) {
+    let remaining_capacity = INITIAL_DATA_LIMIT.saturating_sub(data.len());
+    data.extend_from_slice(&bytes[..bytes.len().min(remaining_capacity)]);
+    if preserve {
+        buffered.extend_from_slice(bytes);
+    }
+}
+
+fn is_entity_id_response(frame: &AppFrame, primary_mac: [u8; 6]) -> bool {
+    frame.version == 0
+        && frame.message_type == APP_ENTITY_ID_RESPONSE
+        && frame.address == primary_mac
 }
 
 fn timeout_error(received: &[u8], expected: usize) -> String {
