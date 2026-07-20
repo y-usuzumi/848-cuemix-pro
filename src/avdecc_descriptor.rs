@@ -116,6 +116,20 @@ pub(super) fn localized_description(descriptor: &[u8]) -> Option<u16> {
         .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
 }
 
+pub(super) fn minimum_descriptor_body_len(descriptor_type: u16) -> usize {
+    match descriptor_type {
+        0x0000 => ENTITY_DESCRIPTOR_LEN,
+        0x0001 => CONFIGURATION_DESCRIPTOR_HEADER_LEN,
+        0x0002 => AUDIO_UNIT_BODY_LEN,
+        0x000c => 68,
+        0x000d => STRINGS_DESCRIPTOR_LEN,
+        0x000e | 0x000f => STREAM_PORT_BODY_LEN,
+        0x0014 => 83,
+        0x001a => 100,
+        _ => 1,
+    }
+}
+
 pub(super) fn audio_unit_topology_json(descriptor: &[u8]) -> Option<String> {
     if descriptor.len() < AUDIO_UNIT_BODY_LEN {
         return None;

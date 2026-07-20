@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 
 use super::avdecc_descriptor::{
     audio_cluster_topology_json, audio_unit_topology_json, control_topology_json,
-    localized_description, stream_port_topology_json, strings_descriptor_json,
-    ConfigurationDescriptorResult, EntityDescriptorResult,
+    localized_description, minimum_descriptor_body_len, stream_port_topology_json,
+    strings_descriptor_json, ConfigurationDescriptorResult, EntityDescriptorResult,
 };
 use super::{hex_preview, AppFrame, AvdeccProxy, APP_AVDECC_FROM_APC, APP_AVDECC_FROM_APS};
 
@@ -137,6 +137,12 @@ pub(super) fn read_descriptor(
         };
         frames.push(frame);
         if let Some((aem_status, response_reserved, descriptor)) = result {
+            validate_successful_descriptor_body(
+                descriptor_type,
+                descriptor_index,
+                aem_status,
+                &descriptor,
+            )?;
             return Ok(DescriptorResult {
                 aem_status,
                 response_reserved,
@@ -147,6 +153,22 @@ pub(super) fn read_descriptor(
             });
         }
     }
+}
+
+fn validate_successful_descriptor_body(
+    descriptor_type: u16,
+    descriptor_index: u16,
+    aem_status: u8,
+    descriptor: &[u8],
+) -> Result<(), String> {
+    let minimum = minimum_descriptor_body_len(descriptor_type);
+    if aem_status == 0 && descriptor.len() < minimum {
+        return Err(format!(
+            "successful descriptor 0x{descriptor_type:04x}:{descriptor_index} is only {} bytes; expected at least {minimum}",
+            descriptor.len()
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn descriptor_json(result: &DescriptorResult) -> String {
@@ -315,6 +337,60 @@ mod tests {
             ),
             Ok(Some((1, 0, Vec::new())))
         );
+    }
+
+    #[test]
+    fn rejects_successful_truncated_descriptors() {
+        assert!(validate_successful_descriptor_body(ENTITY_DESCRIPTOR, 0, 0, &[]).is_err());
+        assert!(validate_successful_descriptor_body(0x00fe, 0, 0, &[]).is_err());
+        assert!(validate_successful_descriptor_body(ENTITY_DESCRIPTOR, 0, 1, &[]).is_ok());
+    }
+
+    #[test]
+    fn rejects_mismatched_read_descriptor_response_fields() {
+        let target = 0x0001_f2ff_fefe_b9e2;
+        let controller = 0x0001_f210_fffe_b9e2;
+        let mut response =
+            aem_read_descriptor_command(target, controller, 1, 0, ENTITY_DESCRIPTOR, 0);
+        response[1] = AEM_RESPONSE;
+        response.extend_from_slice(&target.to_be_bytes());
+        response[2..4].copy_from_slice(&28u16.to_be_bytes());
+        for offset in [4, 12, 20, 22, 24, 28, 30] {
+            let mut mismatched = response.clone();
+            mismatched[offset] ^= 1;
+            assert_eq!(
+                parse_read_descriptor_response(
+                    &mismatched,
+                    target,
+                    controller,
+                    1,
+                    0,
+                    ENTITY_DESCRIPTOR,
+                    0,
+                ),
+                Ok(None)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_read_descriptor_response_length() {
+        let target = 0x0001_f2ff_fefe_b9e2;
+        let controller = 0x0001_f210_fffe_b9e2;
+        let mut response =
+            aem_read_descriptor_command(target, controller, 1, 0, ENTITY_DESCRIPTOR, 0);
+        response[1] = AEM_RESPONSE;
+        response[2..4].copy_from_slice(&19u16.to_be_bytes());
+        assert!(parse_read_descriptor_response(
+            &response,
+            target,
+            controller,
+            1,
+            0,
+            ENTITY_DESCRIPTOR,
+            0,
+        )
+        .is_err());
     }
 
     #[test]
