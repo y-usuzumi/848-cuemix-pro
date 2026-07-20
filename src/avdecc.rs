@@ -17,6 +17,9 @@ use avdecc_transport::{connect_with_timeout, parse_proxy_address, validate_proxy
 #[path = "avdecc_aem.rs"]
 mod avdecc_aem;
 
+#[path = "avdecc_descriptor.rs"]
+mod avdecc_descriptor;
+
 #[path = "avdecc_probe.rs"]
 mod avdecc_probe;
 

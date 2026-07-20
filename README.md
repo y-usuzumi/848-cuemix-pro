@@ -85,7 +85,7 @@ cargo run -- avdecc-probe 192.168.1.50 --request-entity-id eth2 \\
 
 For a descriptor type and index confirmed by that table, the generic diagnostic
 form is available. For example, the 848 reports Audio Unit type `0x0002`, index
-`0`, and Matrix type `0x001a`, index `0`:
+`0`, and Control type `0x001a`, index `0`:
 
 ```sh
 cargo run -- avdecc-probe 192.168.1.50 --request-entity-id eth2 \\
@@ -96,6 +96,11 @@ Each invocation sends one `READ_DESCRIPTOR` request and prints the complete
 bounded descriptor payload. It validates the target, candidate controller ID,
 sequence, command, type, and index before exposing a response. It remains
 diagnostic-only and never sends a control command.
+
+On the tested 848, the A/B/C monitor labels resolve to standalone Audio Clusters
+`23` (`ABC Monitor L`) and `24` (`ABC Monitor R`). The only advertised standard
+Control is an unrelated `IDENTIFY` control. Do not infer an A/B/C switching
+command from those labels; its vendor-specific mapping remains unimplemented.
 
 An 848 directly attached to this Linux machine may advertise only IPv6. In that
 case, use bracket notation, for example `"[2604:4080:1503:8036::1]"`.

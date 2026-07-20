@@ -11,6 +11,7 @@ and is served by the same binary.
 - `src/cli.rs`: command-line parsing and output.
 - `src/avdecc.rs`: bounded AVDECC Proxy tunnel inspection.
 - `src/avdecc_aem.rs`: bounded read-only AEM descriptor diagnostics.
+- `src/avdecc_descriptor.rs`: bounded AEM descriptor-content decoders.
 - `src/avdecc_probe.rs`: AVDECC probe orchestration and JSON output.
 - `src/avdecc_format.rs`: AVDECC probe JSON formatting.
 - `src/avdecc_transport.rs`: AVDECC proxy address validation and TCP setup.

@@ -3,8 +3,10 @@ use std::time::Duration;
 use crate::device::json_escape;
 
 use super::avdecc_aem::{
-    configuration_descriptor_json, entity_descriptor_json, read_configuration_descriptor,
-    read_descriptor, read_entity_descriptor, ConfigurationDescriptorResult, DescriptorResult,
+    read_configuration_descriptor, read_descriptor, read_entity_descriptor, DescriptorResult,
+};
+use super::avdecc_descriptor::{
+    configuration_descriptor_json, entity_descriptor_json, ConfigurationDescriptorResult,
     EntityDescriptorResult,
 };
 use super::avdecc_format::{app_frame_json, hex_preview};
