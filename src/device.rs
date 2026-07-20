@@ -179,9 +179,12 @@ pub(crate) struct HttpResponse {
 
 pub(crate) fn parse_http_response(bytes: &[u8]) -> Result<HttpResponse, String> {
     let raw = String::from_utf8_lossy(bytes);
-    let (head, body) = raw
-        .split_once("\r\n\r\n")
-        .ok_or("response did not contain HTTP header separator")?;
+    let (head, body) = raw.split_once("\r\n\r\n").ok_or_else(|| {
+        format!(
+            "response did not contain HTTP header separator (received {} bytes)",
+            bytes.len()
+        )
+    })?;
     let mut lines = head.lines();
     let status_line = lines.next().ok_or("empty HTTP response")?;
     let mut status_parts = status_line.splitn(3, ' ');
@@ -437,6 +440,14 @@ mod tests {
         let response = parse_http_response(raw).unwrap();
         assert_eq!(response.body, "hello");
         assert_eq!(decode_chunked(b"1\r\naX0\r\n\r\n"), None);
+    }
+
+    #[test]
+    fn reports_the_size_of_a_malformed_response() {
+        assert_eq!(
+            parse_http_response(b"no headers").unwrap_err(),
+            "response did not contain HTTP header separator (received 10 bytes)"
+        );
     }
 
     #[test]
