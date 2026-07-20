@@ -10,6 +10,8 @@ and is served by the same binary.
 
 - `src/cli.rs`: command-line parsing and output.
 - `src/avdecc.rs`: bounded AVDECC Proxy tunnel inspection.
+- `src/avdecc_aem.rs`: bounded read-only AEM descriptor diagnostics.
+- `src/avdecc_probe.rs`: AVDECC probe orchestration and JSON output.
 - `src/avdecc_format.rs`: AVDECC probe JSON formatting.
 - `src/avdecc_transport.rs`: AVDECC proxy address validation and TCP setup.
 - `src/device.rs`: HTTP client, response decoding, form-body generation, and
@@ -31,8 +33,11 @@ and is served by the same binary.
 - Polling is the UI recovery mechanism until AVDECC unsolicited notifications
   are implemented. Do not remove it merely because a write endpoint responds.
 - A v0 AVDECC Proxy identity reply with a nonzero reserved field is not a
-  controller identity. Do not transmit AECP through that tunnel; retain the
-  reply only as protocol evidence.
+  standard controller identity. Treat its payload only as a vendor-extension
+  candidate. It may be used for a source-backed, single read-only
+  `READ_DESCRIPTOR` exchange that validates the target, candidate, sequence,
+  command, descriptor type, and descriptor index in its reply; never use it
+  for configuration, control, or notification registration.
 - The loopback UI protects against cross-site browser writes. It is not a
   security boundary against hostile processes running on the same machine,
   which may be able to contact the 848 directly.

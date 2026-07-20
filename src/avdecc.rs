@@ -2,17 +2,25 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
-use crate::device::{json_escape, parse_http_response, HttpResponse};
+use crate::device::{parse_http_response, HttpResponse};
 
 #[path = "avdecc_format.rs"]
 mod avdecc_format;
 
-use avdecc_format::{app_frame_json, hex_preview};
+use avdecc_format::hex_preview;
 
 #[path = "avdecc_transport.rs"]
 mod avdecc_transport;
 
 use avdecc_transport::{connect_with_timeout, parse_proxy_address, validate_proxy_path};
+
+#[path = "avdecc_aem.rs"]
+mod avdecc_aem;
+
+#[path = "avdecc_probe.rs"]
+mod avdecc_probe;
+
+pub(crate) use avdecc_probe::{probe, write_probe_result, DescriptorRead};
 
 // IEEE 1722.1-2013 Annex C APPDU: version, type, payload length, EUI-48,
 // then a reserved/status u16 before the payload.
@@ -57,78 +65,11 @@ impl AppFrame {
     }
 }
 
-pub(crate) struct AvdeccProbeResult {
-    status: u16,
-    reason: String,
-    frames: Vec<AppFrame>,
-    initial_data: Vec<u8>,
-    entity_id: Option<u64>,
-    entity_id_reserved: Option<u16>,
-}
-
 #[derive(Default)]
 struct EntityIdResult {
     entity_id: Option<u64>,
     reserved: Option<u16>,
     frames: Vec<AppFrame>,
-}
-
-pub(crate) fn probe(
-    host: &str,
-    path: &str,
-    interface: Option<&str>,
-    timeout: Duration,
-) -> Result<AvdeccProbeResult, String> {
-    let mut proxy = AvdeccProxy::connect(host, path, timeout)?;
-    let preserve_initial_data = interface.is_some();
-    let initial_data =
-        proxy.read_available_for(timeout.min(INITIAL_FRAME_WAIT), preserve_initial_data)?;
-    let initial_frames = if preserve_initial_data {
-        Vec::new()
-    } else {
-        decode_complete_v0_frames(&initial_data)
-    };
-    let entity_id_result = if let Some(interface) = interface {
-        proxy.request_entity_id(read_interface_mac(interface)?, timeout)?
-    } else {
-        EntityIdResult::default()
-    };
-    Ok(AvdeccProbeResult {
-        status: proxy.response.status,
-        reason: proxy.response.reason,
-        frames: initial_frames
-            .into_iter()
-            .chain(entity_id_result.frames)
-            .collect(),
-        initial_data,
-        entity_id: entity_id_result.entity_id,
-        entity_id_reserved: entity_id_result.reserved,
-    })
-}
-
-pub(crate) fn write_probe_result(result: &AvdeccProbeResult) {
-    let frames = result
-        .frames
-        .iter()
-        .map(app_frame_json)
-        .collect::<Vec<_>>()
-        .join(",");
-    println!(
-        "{{\"status\":{},\"reason\":\"{}\",\"initial_bytes\":{},\"initial_preview\":\"{}\",\"entity_id\":{},\"entity_id_reserved\":{},\"v0_frames\":[{}]}}",
-        result.status,
-        json_escape(&result.reason),
-        result.initial_data.len(),
-        hex_preview(&result.initial_data, 64),
-        result
-            .entity_id
-            .map(|entity_id| format!("\"{entity_id:016x}\""))
-            .unwrap_or_else(|| "null".to_string()),
-        result
-            .entity_id_reserved
-            .map(|reserved| reserved.to_string())
-            .unwrap_or_else(|| "null".to_string()),
-        frames
-    );
 }
 
 struct AvdeccProxy {
@@ -234,13 +175,6 @@ impl AvdeccProxy {
             let is_response = is_entity_id_response(&frame, primary_mac);
             frames.push(frame.clone());
             if is_response {
-                if frame.reserved != 0 {
-                    return Ok(EntityIdResult {
-                        entity_id: None,
-                        reserved: Some(frame.reserved),
-                        frames,
-                    });
-                }
                 let entity_id: [u8; 8] = frame
                     .payload
                     .as_slice()
@@ -248,7 +182,7 @@ impl AvdeccProxy {
                     .map_err(|_| "invalid AVDECC Proxy entity ID response length")?;
                 return Ok(EntityIdResult {
                     entity_id: Some(u64::from_be_bytes(entity_id)),
-                    reserved: Some(0),
+                    reserved: Some(frame.reserved),
                     frames,
                 });
             }
@@ -459,31 +393,6 @@ fn decode_complete_v0_frames(bytes: &[u8]) -> Vec<AppFrame> {
         offset = frame_end;
     }
     frames
-}
-
-fn read_interface_mac(interface: &str) -> Result<[u8; 6], String> {
-    if interface.is_empty()
-        || !interface.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
-        })
-    {
-        return Err("interface name contains unsupported characters".to_string());
-    }
-    let value = std::fs::read_to_string(format!("/sys/class/net/{interface}/address"))
-        .map_err(|error| format!("read MAC address for {interface} failed: {error}"))?;
-    parse_mac_address(value.trim())
-}
-
-fn parse_mac_address(value: &str) -> Result<[u8; 6], String> {
-    let parts = value.split(':').collect::<Vec<_>>();
-    if parts.len() != 6 {
-        return Err("MAC address must contain six octets".to_string());
-    }
-    let mut address = [0; 6];
-    for (index, part) in parts.iter().enumerate() {
-        address[index] = u8::from_str_radix(part, 16).map_err(|_| "invalid MAC address")?;
-    }
-    Ok(address)
 }
 
 #[cfg(test)]

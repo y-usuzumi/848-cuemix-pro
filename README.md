@@ -47,7 +47,7 @@ This only opens the proxy's HTTP `CONNECT` tunnel, listens briefly for data,
 and prints a bounded JSON summary. It decodes complete version-0 proxy frames
 when present, but preserves all received bytes as a hex preview. The current
 848 advertises DNS-SD `Version=1` and answers a v0 envelope with a nonzero
-reserved field; this app does not transmit any AECP descriptor command.
+reserved field.
 
 For a standards-defined v0 compatibility check, request an ephemeral proxy
 controller identity using the host interface's MAC address:
@@ -56,10 +56,46 @@ controller identity using the host interface's MAC address:
 cargo run -- avdecc-probe 192.168.1.50 --request-entity-id eth2
 ```
 
-This sends only the v0 `ENTITY_ID_REQUEST` APPDU; it does not send AECP or
-control the audio interface. A usable v0 reply has `entity_id_reserved: 0`.
-Treat any other result as protocol evidence, not as permission to try a guessed
-version-1 frame.
+This sends only the v0 `ENTITY_ID_REQUEST` APPDU; it does not control the audio
+interface. A reply with `entity_id_reserved: 0` is a standard identity. The
+848's nonzero result is printed as `entity_id_candidate`, not as a trusted
+controller identity.
+
+After a candidate has been observed, a narrowly scoped descriptor check can
+request static metadata for the advertised target entity:
+
+```sh
+cargo run -- avdecc-probe 192.168.1.50 --request-entity-id eth2 \\
+  --read-entity-descriptor 0001f2fffefeb9e2
+```
+
+This sends one standards-defined AEM `READ_DESCRIPTOR` command for entity
+descriptor zero. It validates the target, candidate controller ID, and sequence
+in the reply, and never sends a gain, phantom-power, routing, monitor, or
+notification-registration command. It is still a request to the device, so use
+it only while the 848 is available for diagnostics.
+
+The 848 currently reports one active Configuration (`0`). Its static
+descriptor-count table can be read independently:
+
+```sh
+cargo run -- avdecc-probe 192.168.1.50 --request-entity-id eth2 \\
+  --read-configuration-descriptor 0001f2fffefeb9e2
+```
+
+For a descriptor type and index confirmed by that table, the generic diagnostic
+form is available. For example, the 848 reports Audio Unit type `0x0002`, index
+`0`, and Matrix type `0x001a`, index `0`:
+
+```sh
+cargo run -- avdecc-probe 192.168.1.50 --request-entity-id eth2 \\
+  --read-descriptor 0001f2fffefeb9e2 0x0002 0
+```
+
+Each invocation sends one `READ_DESCRIPTOR` request and prints the complete
+bounded descriptor payload. It validates the target, candidate controller ID,
+sequence, command, type, and index before exposing a response. It remains
+diagnostic-only and never sends a control command.
 
 An 848 directly attached to this Linux machine may advertise only IPv6. In that
 case, use bracket notation, for example `"[2604:4080:1503:8036::1]"`.

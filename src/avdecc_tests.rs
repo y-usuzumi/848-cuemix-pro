@@ -62,7 +62,7 @@ fn parses_proxy_addresses() {
 #[test]
 fn parses_mac_addresses() {
     assert_eq!(
-        parse_mac_address("aa:bb:cc:dd:ee:ff"),
+        avdecc_transport::parse_mac_address("aa:bb:cc:dd:ee:ff"),
         Ok([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
     );
 }

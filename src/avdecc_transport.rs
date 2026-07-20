@@ -1,6 +1,31 @@
 use std::net::{Ipv6Addr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
+pub(super) fn read_interface_mac(interface: &str) -> Result<[u8; 6], String> {
+    if interface.is_empty()
+        || !interface.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+    {
+        return Err("interface name contains unsupported characters".to_string());
+    }
+    let value = std::fs::read_to_string(format!("/sys/class/net/{interface}/address"))
+        .map_err(|error| format!("read MAC address for {interface} failed: {error}"))?;
+    parse_mac_address(value.trim())
+}
+
+pub(super) fn parse_mac_address(value: &str) -> Result<[u8; 6], String> {
+    let parts = value.split(':').collect::<Vec<_>>();
+    if parts.len() != 6 {
+        return Err("MAC address must contain six octets".to_string());
+    }
+    let mut address = [0; 6];
+    for (index, part) in parts.iter().enumerate() {
+        address[index] = u8::from_str_radix(part, 16).map_err(|_| "invalid MAC address")?;
+    }
+    Ok(address)
+}
+
 pub(super) struct ProxyAddress {
     pub(super) host_header: String,
     pub(super) socket_address: String,

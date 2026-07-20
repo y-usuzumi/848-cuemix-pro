@@ -2,7 +2,7 @@ use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::avdecc::{probe as probe_avdecc, write_probe_result};
+use crate::avdecc::{probe as probe_avdecc, write_probe_result, DescriptorRead};
 use crate::device::{datastore_write_request, DeviceClient, HttpResponse};
 use crate::discovery::{discover_avdecc, write_discovery_results};
 use crate::probe::{probe_device, write_probe_results};
@@ -27,6 +27,9 @@ pub(crate) fn run() -> Result<(), String> {
                 &host,
                 &options.path,
                 options.request_entity_id.as_deref(),
+                options.read_entity_descriptor,
+                options.read_configuration_descriptor,
+                options.read_descriptor,
                 options.timeout,
             )?);
         }
@@ -80,7 +83,7 @@ fn print_usage() {
         "cuemix-848\n\n\
          Usage:\n\
            cuemix-848 discover [--timeout-ms n]\n\
-           cuemix-848 avdecc-probe <host> [--path /] [--request-entity-id interface] [--timeout-ms n]\n\
+           cuemix-848 avdecc-probe <host> [--path /] [--request-entity-id interface] [--read-entity-descriptor id|--read-configuration-descriptor id|--read-descriptor id type index] [--timeout-ms n]\n\
            cuemix-848 probe <host> [--save file] [--timeout-ms n]\n\
            cuemix-848 get <host> <path> [--save file] [--timeout-ms n]\n\
            cuemix-848 set <host> <datastore-path> <value> [--method POST|PATCH] [--timeout-ms n]\n\
@@ -122,6 +125,9 @@ struct AvdeccProbeOptions {
     timeout: Duration,
     path: String,
     request_entity_id: Option<String>,
+    read_entity_descriptor: Option<u64>,
+    read_configuration_descriptor: Option<u64>,
+    read_descriptor: Option<DescriptorRead>,
 }
 
 impl AvdeccProbeOptions {
@@ -129,6 +135,9 @@ impl AvdeccProbeOptions {
         let mut timeout = Duration::from_millis(2500);
         let mut path = "/".to_string();
         let mut request_entity_id = None;
+        let mut read_entity_descriptor = None;
+        let mut read_configuration_descriptor = None;
+        let mut read_descriptor = None;
         let mut index = 0;
         while index < args.len() {
             match args[index].as_str() {
@@ -147,6 +156,44 @@ impl AvdeccProbeOptions {
                             .to_string(),
                     );
                 }
+                "--read-entity-descriptor" => {
+                    index += 1;
+                    read_entity_descriptor = Some(parse_entity_id(
+                        args.get(index)
+                            .ok_or("missing entity ID for --read-entity-descriptor")?,
+                    )?);
+                }
+                "--read-configuration-descriptor" => {
+                    index += 1;
+                    read_configuration_descriptor = Some(parse_entity_id(
+                        args.get(index)
+                            .ok_or("missing entity ID for --read-configuration-descriptor")?,
+                    )?);
+                }
+                "--read-descriptor" => {
+                    index += 1;
+                    let target_entity_id = parse_entity_id(
+                        args.get(index)
+                            .ok_or("missing entity ID for --read-descriptor")?,
+                    )?;
+                    index += 1;
+                    let descriptor_type = parse_u16(
+                        args.get(index)
+                            .ok_or("missing descriptor type for --read-descriptor")?,
+                        "descriptor type",
+                    )?;
+                    index += 1;
+                    let descriptor_index = parse_u16(
+                        args.get(index)
+                            .ok_or("missing descriptor index for --read-descriptor")?,
+                        "descriptor index",
+                    )?;
+                    read_descriptor = Some(DescriptorRead {
+                        target_entity_id,
+                        descriptor_type,
+                        descriptor_index,
+                    });
+                }
                 "--timeout-ms" => {
                     index += 1;
                     timeout = parse_timeout(args.get(index))?;
@@ -155,12 +202,37 @@ impl AvdeccProbeOptions {
             }
             index += 1;
         }
+        let descriptor_requests = read_entity_descriptor.is_some() as u8
+            + read_configuration_descriptor.is_some() as u8
+            + read_descriptor.is_some() as u8;
+        if descriptor_requests > 1 {
+            return Err("request only one descriptor per AVDECC probe".to_string());
+        }
         Ok(Self {
             timeout,
             path,
             request_entity_id,
+            read_entity_descriptor,
+            read_configuration_descriptor,
+            read_descriptor,
         })
     }
+}
+
+fn parse_entity_id(value: &str) -> Result<u64, String> {
+    let value = value.strip_prefix("0x").unwrap_or(value);
+    if value.len() != 16 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("entity ID must be exactly 16 hexadecimal digits".to_string());
+    }
+    u64::from_str_radix(value, 16).map_err(|_| "invalid entity ID".to_string())
+}
+
+fn parse_u16(value: &str, name: &str) -> Result<u16, String> {
+    let (radix, value) = value
+        .strip_prefix("0x")
+        .map(|value| (16, value))
+        .unwrap_or((10, value));
+    u16::from_str_radix(value, radix).map_err(|_| format!("invalid {name}"))
 }
 
 impl ReadOptions {
@@ -259,6 +331,39 @@ fn parse_timeout(value: Option<&String>) -> Result<Duration, String> {
         .parse::<u64>()
         .map_err(|_| "invalid --timeout-ms value")?;
     Ok(Duration::from_millis(milliseconds))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_generic_read_descriptor_request() {
+        let options = AvdeccProbeOptions::parse(vec![
+            "--request-entity-id".to_string(),
+            "eth2".to_string(),
+            "--read-descriptor".to_string(),
+            "0001f2fffefeb9e2".to_string(),
+            "0x001a".to_string(),
+            "0".to_string(),
+        ])
+        .expect("valid options");
+        let request = options.read_descriptor.expect("descriptor request");
+        assert_eq!(request.target_entity_id, 0x0001_f2ff_fefe_b9e2);
+        assert_eq!(request.descriptor_type, 0x001a);
+        assert_eq!(request.descriptor_index, 0);
+    }
+
+    #[test]
+    fn rejects_multiple_descriptor_requests() {
+        assert!(AvdeccProbeOptions::parse(vec![
+            "--read-entity-descriptor".to_string(),
+            "0001f2fffefeb9e2".to_string(),
+            "--read-configuration-descriptor".to_string(),
+            "0001f2fffefeb9e2".to_string(),
+        ])
+        .is_err());
+    }
 }
 
 fn write_response_body(response: &HttpResponse, path: PathBuf) -> Result<(), String> {
