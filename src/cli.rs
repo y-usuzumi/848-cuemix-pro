@@ -30,7 +30,10 @@ pub(crate) fn run() -> Result<(), String> {
                 options.read_entity_descriptor,
                 options.read_configuration_descriptor,
                 options.read_descriptor,
-                options.timeout,
+                ProbeTiming {
+                    timeout: options.timeout,
+                    listen: options.listen,
+                },
             )?);
         }
         "probe" => {
@@ -123,6 +126,7 @@ struct ReadOptions {
 
 struct AvdeccProbeOptions {
     timeout: Duration,
+    listen: Duration,
     path: String,
     request_entity_id: Option<String>,
     read_entity_descriptor: Option<u64>,
@@ -133,6 +137,7 @@ struct AvdeccProbeOptions {
 impl AvdeccProbeOptions {
     fn parse(args: Vec<String>) -> Result<Self, String> {
         let mut timeout = Duration::from_millis(2500);
+        let mut listen = Duration::from_millis(250);
         let mut path = "/".to_string();
         let mut request_entity_id = None;
         let mut read_entity_descriptor = None;
@@ -147,6 +152,10 @@ impl AvdeccProbeOptions {
                         .get(index)
                         .ok_or("missing value for --path")?
                         .to_string();
+                }
+                "--listen-ms" => {
+                    index += 1;
+                    listen = parse_listen_duration(args.get(index))?;
                 }
                 "--request-entity-id" => {
                     index += 1;
@@ -210,6 +219,7 @@ impl AvdeccProbeOptions {
         }
         Ok(Self {
             timeout,
+            listen,
             path,
             request_entity_id,
             read_entity_descriptor,
@@ -333,6 +343,18 @@ fn parse_timeout(value: Option<&String>) -> Result<Duration, String> {
     Ok(Duration::from_millis(milliseconds))
 }
 
+fn parse_listen_duration(value: Option<&String>) -> Result<Duration, String> {
+    let milliseconds = value
+        .ok_or("missing value for --listen-ms")?
+        .parse::<u64>()
+        .map_err(|_| "invalid --listen-ms value")?;
+    let duration = Duration::from_millis(milliseconds);
+    if duration.is_zero() || duration > Duration::from_secs(30) {
+        return Err("--listen-ms must be between 1 and 30000".to_string());
+    }
+    Ok(duration)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,6 +386,21 @@ mod tests {
         ])
         .is_err());
     }
+
+    #[test]
+    fn parses_a_bounded_passive_listen_duration() {
+        let options =
+            AvdeccProbeOptions::parse(vec!["--listen-ms".to_string(), "15000".to_string()])
+                .expect("valid options");
+        assert_eq!(options.listen, Duration::from_secs(15));
+        assert!(
+            AvdeccProbeOptions::parse(vec!["--listen-ms".to_string(), "0".to_string()]).is_err()
+        );
+        assert!(
+            AvdeccProbeOptions::parse(vec!["--listen-ms".to_string(), "30001".to_string(),])
+                .is_err()
+        );
+    }
 }
 
 fn write_response_body(response: &HttpResponse, path: PathBuf) -> Result<(), String> {
@@ -383,3 +420,4 @@ fn print_response(response: &HttpResponse) {
         println!();
     }
 }
+use crate::avdecc::ProbeTiming;

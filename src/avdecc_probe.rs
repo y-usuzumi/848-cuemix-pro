@@ -16,7 +16,7 @@ use super::{decode_complete_v0_frames, AppFrame, AvdeccProxy, EntityIdResult, IN
 pub(crate) struct AvdeccProbeResult {
     status: u16,
     reason: String,
-    frames: Vec<AppFrame>,
+    frames: Vec<ObservedFrame>,
     initial_data: Vec<u8>,
     entity_id: Option<u64>,
     entity_id_reserved: Option<u16>,
@@ -25,10 +25,29 @@ pub(crate) struct AvdeccProbeResult {
     descriptor: Option<DescriptorResult>,
 }
 
+struct ObservedFrame {
+    frame: AppFrame,
+    received_ms: Option<u128>,
+}
+
+impl ObservedFrame {
+    fn unobserved(frame: AppFrame) -> Self {
+        Self {
+            frame,
+            received_ms: None,
+        }
+    }
+}
+
 pub(crate) struct DescriptorRead {
     pub(crate) target_entity_id: u64,
     pub(crate) descriptor_type: u16,
     pub(crate) descriptor_index: u16,
+}
+
+pub(crate) struct ProbeTiming {
+    pub(crate) timeout: Duration,
+    pub(crate) listen: Duration,
 }
 
 pub(crate) fn probe(
@@ -38,8 +57,10 @@ pub(crate) fn probe(
     target_entity_id: Option<u64>,
     configuration_target_entity_id: Option<u64>,
     descriptor_read: Option<DescriptorRead>,
-    timeout: Duration,
+    timing: ProbeTiming,
 ) -> Result<AvdeccProbeResult, String> {
+    let timeout = timing.timeout;
+    let listen = timing.listen;
     let descriptor_requests = target_entity_id.is_some() as u8
         + configuration_target_entity_id.is_some() as u8
         + descriptor_read.is_some() as u8;
@@ -51,13 +72,14 @@ pub(crate) fn probe(
     }
     let mut proxy = AvdeccProxy::connect(host, path, timeout)?;
     let preserve_initial_data = interface.is_some();
-    let initial_data =
-        proxy.read_available_for(timeout.min(INITIAL_FRAME_WAIT), preserve_initial_data)?;
+    let initial =
+        proxy.read_available_for(listen.max(INITIAL_FRAME_WAIT), preserve_initial_data)?;
     let initial_frames = if preserve_initial_data {
         Vec::new()
     } else {
-        decode_complete_v0_frames(&initial_data)
+        observe_initial_frames(&initial)
     };
+    let initial_data = initial.bytes;
     let entity_id_result = if let Some(interface) = interface {
         proxy.request_entity_id(read_interface_mac(interface)?, timeout)?
     } else {
@@ -111,24 +133,32 @@ pub(crate) fn probe(
         reason: proxy.response.reason,
         frames: initial_frames
             .into_iter()
-            .chain(entity_id_result.frames)
+            .chain(
+                entity_id_result
+                    .frames
+                    .into_iter()
+                    .map(ObservedFrame::unobserved),
+            )
             .chain(
                 entity_descriptor
                     .as_ref()
                     .into_iter()
-                    .flat_map(|descriptor| descriptor.frames.iter().cloned()),
+                    .flat_map(|descriptor| descriptor.frames.iter().cloned())
+                    .map(ObservedFrame::unobserved),
             )
             .chain(
                 configuration_descriptor
                     .as_ref()
                     .into_iter()
-                    .flat_map(|descriptor| descriptor.frames.iter().cloned()),
+                    .flat_map(|descriptor| descriptor.frames.iter().cloned())
+                    .map(ObservedFrame::unobserved),
             )
             .chain(
                 descriptor
                     .as_ref()
                     .into_iter()
-                    .flat_map(|descriptor| descriptor.frames.iter().cloned()),
+                    .flat_map(|descriptor| descriptor.frames.iter().cloned())
+                    .map(ObservedFrame::unobserved),
             )
             .collect(),
         initial_data,
@@ -140,11 +170,36 @@ pub(crate) fn probe(
     })
 }
 
+fn observe_initial_frames(initial: &super::InitialData) -> Vec<ObservedFrame> {
+    let mut end_offset = 0;
+    decode_complete_v0_frames(&initial.bytes)
+        .into_iter()
+        .map(|frame| {
+            end_offset += super::APP_HEADER_LEN + frame.payload.len();
+            let received_ms = initial
+                .chunks
+                .iter()
+                .find(|chunk| chunk.end_offset >= end_offset)
+                .map(|chunk| chunk.received_after.as_millis());
+            ObservedFrame { frame, received_ms }
+        })
+        .collect()
+}
+
+fn observed_frame_json(observed: &ObservedFrame) -> String {
+    observed
+        .received_ms
+        .map(|received_ms| {
+            super::avdecc_format::observed_app_frame_json(&observed.frame, received_ms)
+        })
+        .unwrap_or_else(|| app_frame_json(&observed.frame))
+}
+
 pub(crate) fn write_probe_result(result: &AvdeccProbeResult) {
     let frames = result
         .frames
         .iter()
-        .map(app_frame_json)
+        .map(observed_frame_json)
         .collect::<Vec<_>>()
         .join(",");
     println!(
@@ -178,4 +233,50 @@ pub(crate) fn write_probe_result(result: &AvdeccProbeResult) {
             .unwrap_or_else(|| "null".to_string()),
         frames
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::super::{InitialChunk, InitialData, APP_ENTITY_ID_RESPONSE};
+    use super::*;
+
+    #[test]
+    fn assigns_each_complete_initial_frame_its_arrival_time() {
+        let first = AppFrame {
+            version: 0,
+            message_type: APP_ENTITY_ID_RESPONSE,
+            address: [1, 2, 3, 4, 5, 6],
+            reserved: 0,
+            payload: Vec::new(),
+        };
+        let second = AppFrame {
+            version: 0,
+            message_type: APP_ENTITY_ID_RESPONSE,
+            address: [6, 5, 4, 3, 2, 1],
+            reserved: 0,
+            payload: Vec::new(),
+        };
+        let first_bytes = first.encode().expect("first frame");
+        let second_bytes = second.encode().expect("second frame");
+        let initial = InitialData {
+            bytes: [first_bytes.clone(), second_bytes].concat(),
+            chunks: vec![
+                InitialChunk {
+                    end_offset: first_bytes.len(),
+                    received_after: Duration::from_millis(5),
+                },
+                InitialChunk {
+                    end_offset: first_bytes.len() * 2,
+                    received_after: Duration::from_millis(9),
+                },
+            ],
+        };
+
+        let frames = observe_initial_frames(&initial);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].received_ms, Some(5));
+        assert_eq!(frames[1].received_ms, Some(9));
+    }
 }

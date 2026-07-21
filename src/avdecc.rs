@@ -75,6 +75,16 @@ struct EntityIdResult {
     frames: Vec<AppFrame>,
 }
 
+pub(super) struct InitialData {
+    pub(super) bytes: Vec<u8>,
+    pub(super) chunks: Vec<InitialChunk>,
+}
+
+pub(super) struct InitialChunk {
+    pub(super) end_offset: usize,
+    pub(super) received_after: Duration,
+}
+
 struct AvdeccProxy {
     stream: TcpStream,
     buffered: Vec<u8>,
@@ -117,13 +127,24 @@ impl AvdeccProxy {
         })
     }
 
-    fn read_available_for(&mut self, wait: Duration, preserve: bool) -> Result<Vec<u8>, String> {
+    fn read_available_for(
+        &mut self,
+        wait: Duration,
+        preserve: bool,
+    ) -> Result<InitialData, String> {
         let started = Instant::now();
         let mut data = if preserve {
             self.buffered.clone()
         } else {
             std::mem::take(&mut self.buffered)
         };
+        let mut chunks = Vec::new();
+        if !data.is_empty() {
+            chunks.push(InitialChunk {
+                end_offset: data.len(),
+                received_after: Duration::ZERO,
+            });
+        }
         while data.len() < INITIAL_DATA_LIMIT {
             let Some(remaining) = wait.checked_sub(started.elapsed()) else {
                 break;
@@ -135,7 +156,18 @@ impl AvdeccProxy {
             match self.stream.read(&mut buffer) {
                 Ok(0) => return Err("AVDECC Proxy closed the tunnel".to_string()),
                 Ok(count) => {
-                    append_preview_bytes(&mut data, &mut self.buffered, &buffer[..count], preserve)
+                    let added = append_preview_bytes(
+                        &mut data,
+                        &mut self.buffered,
+                        &buffer[..count],
+                        preserve,
+                    );
+                    if added > 0 {
+                        chunks.push(InitialChunk {
+                            end_offset: data.len(),
+                            received_after: started.elapsed(),
+                        });
+                    }
                 }
                 Err(error)
                     if matches!(
@@ -145,10 +177,23 @@ impl AvdeccProxy {
                 {
                     break
                 }
+                Err(error)
+                    if !data.is_empty()
+                        && matches!(
+                            error.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                        ) =>
+                {
+                    break
+                }
                 Err(error) => return Err(format!("read AVDECC Proxy tunnel failed: {error}")),
             }
         }
-        Ok(data)
+        Ok(InitialData {
+            bytes: data,
+            chunks,
+        })
     }
 
     fn request_entity_id(
@@ -266,12 +311,18 @@ impl AvdeccProxy {
     }
 }
 
-fn append_preview_bytes(data: &mut Vec<u8>, buffered: &mut Vec<u8>, bytes: &[u8], preserve: bool) {
+fn append_preview_bytes(
+    data: &mut Vec<u8>,
+    buffered: &mut Vec<u8>,
+    bytes: &[u8],
+    preserve: bool,
+) -> usize {
     let remaining_capacity = INITIAL_DATA_LIMIT.saturating_sub(data.len());
     data.extend_from_slice(&bytes[..bytes.len().min(remaining_capacity)]);
     if preserve {
         buffered.extend_from_slice(bytes);
     }
+    bytes.len().min(remaining_capacity)
 }
 
 fn is_entity_id_response(frame: &AppFrame, primary_mac: [u8; 6]) -> bool {
@@ -401,3 +452,4 @@ fn decode_complete_v0_frames(bytes: &[u8]) -> Vec<AppFrame> {
 #[cfg(test)]
 #[path = "avdecc_tests.rs"]
 mod tests;
+pub(crate) use avdecc_probe::ProbeTiming;
