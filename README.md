@@ -32,11 +32,17 @@ Discover any 848 advertising the standard AVDECC mDNS service:
 cargo run -- discover
 ```
 
-Discovery sends the native mDNS query over IPv4 and, on Linux, over IPv6
-link-local multicast on every up, multicast-capable non-loopback interface.
-It does not require Avahi. IPv6 link-local answers retain their interface scope
-in discovery output, for example `fe80::1%eth2`; pass that form in brackets to
-a command, such as `[fe80::1%eth2]` or `[fe80::1%eth2]:17221`.
+Discovery sends the native IPv4 mDNS query from every active,
+multicast-capable local IPv4 address on Linux and Windows. This keeps a
+multihomed Windows host from sending the query only through its default adapter
+instead of the MOTU network. On Linux it also sends scoped IPv6 link-local
+multicast on every eligible interface; Windows IPv6 interface enumeration is
+still pending. No Avahi installation is required. IPv6 link-local answers retain
+their interface scope in discovery output, for example `fe80::1%eth2`; pass
+that form in brackets to a command, such as `[fe80::1%eth2]` or
+`[fe80::1%eth2]:17221`. A Windows hardware run confirms that this
+per-interface IPv4 query discovers the tested 848 at `192.168.4.166` and
+returns its full AVDECC DNS-SD TXT record set.
 
 Validate an advertised AVDECC Proxy endpoint without sending an AVDECC or
 device-control command:

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV6, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6, UdpSocket};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -58,17 +58,7 @@ pub(crate) fn discover_avdecc(timeout: Duration) -> Result<Vec<DiscoveryResult>,
 fn discover_avdecc_native(timeout: Duration) -> Result<Vec<DiscoveryResult>, String> {
     const SERVICE: &str = "_avdecc._tcp.local";
     let query = mdns_query(SERVICE);
-    let ipv4 = UdpSocket::bind("0.0.0.0:0")
-        .map_err(|err| format!("bind IPv4 mDNS socket failed: {err}"))?;
-    ipv4.set_nonblocking(true)
-        .map_err(|err| format!("set IPv4 mDNS nonblocking mode failed: {err}"))?;
-    ipv4.send_to(&query, "224.0.0.251:5353")
-        .map_err(|err| format!("send IPv4 mDNS query failed: {err}"))?;
-
-    let mut sockets = vec![DiscoverySocket {
-        socket: ipv4,
-        scope: None,
-    }];
+    let mut sockets = open_ipv4_mdns_sockets(&query)?;
     for interface in ipv6_multicast_interfaces() {
         let socket = match UdpSocket::bind("[::]:0") {
             Ok(socket) => socket,
@@ -140,6 +130,266 @@ fn discover_avdecc_native(timeout: Duration) -> Result<Vec<DiscoveryResult>, Str
     Ok(build_discovery_results(records, SERVICE))
 }
 
+fn open_ipv4_mdns_sockets(query: &[u8]) -> Result<Vec<DiscoverySocket>, String> {
+    let addresses = ipv4_multicast_addresses();
+    let addresses = if addresses.is_empty() {
+        vec![Ipv4Addr::UNSPECIFIED]
+    } else {
+        addresses
+    };
+    let mut sockets = Vec::new();
+    let mut last_error = None;
+    for address in addresses {
+        let socket = match UdpSocket::bind(SocketAddrV4::new(address, 0)) {
+            Ok(socket) => socket,
+            Err(error) => {
+                last_error = Some(format!("bind source {address} failed: {error}"));
+                continue;
+            }
+        };
+        if let Err(error) = socket.set_nonblocking(true) {
+            last_error = Some(format!(
+                "set source {address} nonblocking mode failed: {error}"
+            ));
+            continue;
+        }
+        if let Err(error) = socket.send_to(query, "224.0.0.251:5353") {
+            last_error = Some(format!("send from source {address} failed: {error}"));
+            continue;
+        }
+        sockets.push(DiscoverySocket {
+            socket,
+            scope: None,
+        });
+    }
+    if sockets.is_empty() {
+        return Err(format!(
+            "send IPv4 mDNS query failed: {}",
+            last_error.unwrap_or_else(|| "no eligible IPv4 interface".to_string())
+        ));
+    }
+    Ok(sockets)
+}
+
+fn ipv4_multicast_addresses() -> Vec<Ipv4Addr> {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    {
+        platform_ipv4::addresses()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        Vec::new()
+    }
+}
+
+fn unique_ipv4_addresses(mut addresses: Vec<Ipv4Addr>) -> Vec<Ipv4Addr> {
+    addresses.retain(|address| !address.is_unspecified() && !address.is_loopback());
+    addresses.sort_unstable();
+    addresses.dedup();
+    addresses
+}
+
+#[cfg(target_os = "linux")]
+mod platform_ipv4 {
+    use super::{unique_ipv4_addresses, Ipv4Addr};
+    use std::os::raw::{c_char, c_int};
+
+    const AF_INET: u16 = 2;
+    const IFF_UP: u32 = 0x1;
+    const IFF_LOOPBACK: u32 = 0x8;
+    const IFF_MULTICAST: u32 = 0x1000;
+
+    #[repr(C)]
+    struct SockAddr {
+        family: u16,
+        data: [u8; 14],
+    }
+
+    #[repr(C)]
+    struct SockAddrIn {
+        family: u16,
+        port: u16,
+        address: [u8; 4],
+        zero: [u8; 8],
+    }
+
+    #[repr(C)]
+    struct IfAddrs {
+        next: *mut IfAddrs,
+        name: *mut c_char,
+        flags: u32,
+        address: *mut SockAddr,
+        netmask: *mut SockAddr,
+        destination: *mut SockAddr,
+        data: *mut core::ffi::c_void,
+    }
+
+    extern "C" {
+        fn getifaddrs(addresses: *mut *mut IfAddrs) -> c_int;
+        fn freeifaddrs(addresses: *mut IfAddrs);
+    }
+
+    pub(super) fn addresses() -> Vec<Ipv4Addr> {
+        let mut list = core::ptr::null_mut();
+        if unsafe { getifaddrs(&mut list) } != 0 {
+            return Vec::new();
+        }
+        let mut addresses = Vec::new();
+        let mut current = list;
+        while !current.is_null() {
+            let interface = unsafe { &*current };
+            if interface.flags & (IFF_UP | IFF_MULTICAST) == IFF_UP | IFF_MULTICAST
+                && interface.flags & IFF_LOOPBACK == 0
+                && !interface.address.is_null()
+            {
+                let socket = unsafe { &*interface.address };
+                if socket.family == AF_INET {
+                    let socket = unsafe { &*(interface.address as *const SockAddrIn) };
+                    addresses.push(Ipv4Addr::from(socket.address));
+                }
+            }
+            current = interface.next;
+        }
+        unsafe { freeifaddrs(list) };
+        unique_ipv4_addresses(addresses)
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod platform_ipv4 {
+    use super::{unique_ipv4_addresses, Ipv4Addr};
+    use core::ffi::c_void;
+    use std::mem::size_of;
+    use std::os::raw::c_char;
+
+    const AF_INET: u16 = 2;
+    const ERROR_BUFFER_OVERFLOW: u32 = 111;
+    const ERROR_SUCCESS: u32 = 0;
+    const IF_OPER_STATUS_UP: u32 = 1;
+    const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
+    const IP_ADAPTER_NO_MULTICAST: u32 = 0x10;
+
+    #[repr(C)]
+    struct SockAddr {
+        family: u16,
+        data: [u8; 14],
+    }
+
+    #[repr(C)]
+    struct SockAddrIn {
+        family: u16,
+        port: u16,
+        address: [u8; 4],
+        zero: [u8; 8],
+    }
+
+    #[repr(C)]
+    struct SocketAddress {
+        address: *const SockAddr,
+        length: i32,
+    }
+
+    #[repr(C)]
+    struct AdapterUnicastAddress {
+        length: u32,
+        flags: u32,
+        next: *mut AdapterUnicastAddress,
+        address: SocketAddress,
+    }
+
+    #[repr(C)]
+    struct AdapterAddresses {
+        length: u32,
+        interface_index: u32,
+        next: *mut AdapterAddresses,
+        adapter_name: *mut c_char,
+        first_unicast_address: *mut AdapterUnicastAddress,
+        first_anycast_address: *mut c_void,
+        first_multicast_address: *mut c_void,
+        first_dns_server_address: *mut c_void,
+        dns_suffix: *mut u16,
+        description: *mut u16,
+        friendly_name: *mut u16,
+        physical_address: [u8; 8],
+        physical_address_length: u32,
+        flags: u32,
+        mtu: u32,
+        interface_type: u32,
+        oper_status: u32,
+    }
+
+    #[link(name = "iphlpapi")]
+    extern "system" {
+        fn GetAdaptersAddresses(
+            family: u32,
+            flags: u32,
+            reserved: *mut c_void,
+            addresses: *mut AdapterAddresses,
+            size: *mut u32,
+        ) -> u32;
+    }
+
+    pub(super) fn addresses() -> Vec<Ipv4Addr> {
+        let mut requested_size = 15 * 1024usize;
+        for _ in 0..2 {
+            let words = requested_size
+                .checked_add(size_of::<usize>() - 1)
+                .map(|size| size / size_of::<usize>())
+                .unwrap_or(0);
+            if words == 0 {
+                return Vec::new();
+            }
+            let mut buffer = vec![0usize; words];
+            let mut buffer_size = (buffer.len() * size_of::<usize>()) as u32;
+            let status = unsafe {
+                GetAdaptersAddresses(
+                    u32::from(AF_INET),
+                    0,
+                    core::ptr::null_mut(),
+                    buffer.as_mut_ptr().cast(),
+                    &mut buffer_size,
+                )
+            };
+            if status == ERROR_BUFFER_OVERFLOW {
+                requested_size = (buffer_size as usize).saturating_add(1024);
+                continue;
+            }
+            if status != ERROR_SUCCESS {
+                return Vec::new();
+            }
+            let mut addresses = Vec::new();
+            let mut adapter = buffer.as_ptr().cast::<AdapterAddresses>();
+            while !adapter.is_null() {
+                let current = unsafe { &*adapter };
+                if current.oper_status == IF_OPER_STATUS_UP
+                    && current.interface_type != IF_TYPE_SOFTWARE_LOOPBACK
+                    && current.flags & IP_ADAPTER_NO_MULTICAST == 0
+                {
+                    let mut unicast = current.first_unicast_address;
+                    while !unicast.is_null() {
+                        let address = unsafe { &*unicast };
+                        if address.address.length as usize >= size_of::<SockAddrIn>()
+                            && !address.address.address.is_null()
+                        {
+                            let socket = unsafe { &*address.address.address };
+                            if socket.family == AF_INET {
+                                let socket =
+                                    unsafe { &*(address.address.address as *const SockAddrIn) };
+                                addresses.push(Ipv4Addr::from(socket.address));
+                            }
+                        }
+                        unicast = address.next;
+                    }
+                }
+                adapter = current.next;
+            }
+            return unique_ipv4_addresses(addresses);
+        }
+        Vec::new()
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn ipv6_multicast_interfaces() -> Vec<MulticastInterface> {
     const IFF_UP: u32 = 0x1;
     const IFF_LOOPBACK: u32 = 0x8;
@@ -185,6 +435,12 @@ fn ipv6_multicast_interfaces() -> Vec<MulticastInterface> {
     interfaces
 }
 
+#[cfg(not(target_os = "linux"))]
+fn ipv6_multicast_interfaces() -> Vec<MulticastInterface> {
+    Vec::new()
+}
+
+#[cfg(any(target_os = "linux", test))]
 fn parse_interface_flags(value: &str) -> Option<u32> {
     let value = value.trim();
     let value = value
@@ -542,6 +798,20 @@ mod tests {
         );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].addresses, vec!["::1", "fe80::1%eth2"]);
+    }
+
+    #[test]
+    fn deduplicates_eligible_ipv4_sources() {
+        assert_eq!(
+            unique_ipv4_addresses(vec![
+                Ipv4Addr::new(192, 168, 4, 2),
+                Ipv4Addr::new(127, 0, 0, 1),
+                Ipv4Addr::UNSPECIFIED,
+                Ipv4Addr::new(192, 168, 4, 2),
+                Ipv4Addr::new(10, 0, 0, 2),
+            ]),
+            vec![Ipv4Addr::new(10, 0, 0, 2), Ipv4Addr::new(192, 168, 4, 2)]
+        );
     }
 
     #[test]
