@@ -24,6 +24,15 @@ fn authorizes_only_the_local_page_with_its_session_token() {
 }
 
 #[test]
+fn generates_a_hex_session_token() {
+    let token = new_session_token().expect("session token");
+    assert_eq!(token.len(), 64);
+    assert!(token
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+}
+
+#[test]
 fn limits_proxying_to_the_configured_device() {
     let scope = ServerScope::Configured("192.168.4.166".to_string());
     let params = parse_query("host=192.168.4.166");

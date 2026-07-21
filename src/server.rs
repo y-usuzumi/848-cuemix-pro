@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+#[cfg(not(target_os = "windows"))]
 use std::fs::File;
 use std::io::{self, BufRead, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -12,6 +13,20 @@ use crate::ui;
 const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
 const MAX_REQUEST_HEADER_BYTES: usize = 32 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
+
+#[cfg(target_os = "windows")]
+const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
+
+#[cfg(target_os = "windows")]
+#[link(name = "bcrypt")]
+extern "system" {
+    fn BCryptGenRandom(
+        algorithm: *mut core::ffi::c_void,
+        buffer: *mut u8,
+        buffer_length: u32,
+        flags: u32,
+    ) -> i32;
+}
 
 enum ServerScope {
     Configured(String),
@@ -77,10 +92,38 @@ fn origin_for_address(address: SocketAddr) -> String {
 
 fn new_session_token() -> Result<String, String> {
     let mut bytes = [0u8; 32];
-    File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut bytes))
-        .map_err(|error| format!("read session entropy failed: {error}"))?;
+    fill_session_entropy(&mut bytes)?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn fill_session_entropy(bytes: &mut [u8]) -> Result<(), String> {
+    File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(bytes))
+        .map_err(|error| format!("read session entropy failed: {error}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn fill_session_entropy(bytes: &mut [u8]) -> Result<(), String> {
+    let buffer_length = u32::try_from(bytes.len())
+        .map_err(|_| "session entropy buffer is too large for Windows RNG".to_string())?;
+    let status = unsafe {
+        BCryptGenRandom(
+            core::ptr::null_mut(),
+            bytes.as_mut_ptr(),
+            buffer_length,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "generate session entropy failed: BCryptGenRandom returned 0x{:08x}",
+            status as u32
+        ))
+    }
 }
 
 fn handle_browser_request(
