@@ -237,7 +237,17 @@ case, use bracket notation, for example `"[2604:4080:1503:8036::1]"`.
 cargo run -- probe 192.168.1.50 --save probe.jsonl
 ```
 
-Open a local control UI:
+Open the local discovery landing page:
+
+```sh
+cargo run -- serve
+```
+
+It performs a read-only mDNS scan at startup and lists each discovered 848.
+Opening a device preserves an allow-list of the advertised, usable control
+addresses for that server session. Restart `serve` to rescan.
+
+To skip discovery and start a server scoped to one known device instead:
 
 ```sh
 cargo run -- serve 192.168.1.50
@@ -249,10 +259,11 @@ Then visit:
 http://127.0.0.1:8480
 ```
 
-The browser server intentionally binds only to a numeric loopback address. It
-is scoped to the device host passed to `serve`, and each launch issues its own
-session token for write requests. Start another server instance when you need
-to control a different device.
+The browser server intentionally binds only to a numeric loopback address, and
+each launch issues its own session token for write requests. Fixed-host mode
+accepts only its configured host. Discovery mode accepts only the advertised
+control addresses captured at startup; it does not become an arbitrary-host
+browser proxy.
 
 This is a browser-origin safeguard, not authentication against hostile local
 processes. Anyone with local access to the machine may also be able to reach

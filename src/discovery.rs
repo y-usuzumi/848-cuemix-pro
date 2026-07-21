@@ -8,11 +8,11 @@ use crate::device::json_escape;
 
 #[derive(Clone)]
 pub(crate) struct DiscoveryResult {
-    instance: String,
-    host: String,
-    port: u16,
-    addresses: Vec<String>,
-    txt: Vec<String>,
+    pub(crate) instance: String,
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) addresses: Vec<String>,
+    pub(crate) txt: Vec<String>,
 }
 
 #[cfg(test)]
@@ -675,6 +675,29 @@ fn merge_discovery_results(
         .collect()
 }
 
+pub(crate) fn browser_control_hosts(result: &DiscoveryResult) -> Vec<String> {
+    let mut hosts = BTreeSet::new();
+    for address in &result.addresses {
+        if address.parse::<Ipv4Addr>().is_ok() {
+            hosts.insert(address.clone());
+            continue;
+        }
+        let (raw_address, scope) = address
+            .split_once('%')
+            .map_or((address.as_str(), None), |(address, scope)| {
+                (address, Some(scope))
+            });
+        let Ok(ipv6) = raw_address.parse::<Ipv6Addr>() else {
+            continue;
+        };
+        if ipv6.is_unicast_link_local() && scope.is_none() {
+            continue;
+        }
+        hosts.insert(format!("[{address}]"));
+    }
+    hosts.into_iter().collect()
+}
+
 pub(crate) fn write_discovery_results(results: &[DiscoveryResult]) {
     for result in results {
         let addresses = result
@@ -811,6 +834,30 @@ mod tests {
                 Ipv4Addr::new(10, 0, 0, 2),
             ]),
             vec![Ipv4Addr::new(10, 0, 0, 2), Ipv4Addr::new(192, 168, 4, 2)]
+        );
+    }
+
+    #[test]
+    fn returns_usable_browser_hosts_without_unscoped_link_local_ipv6() {
+        let result = DiscoveryResult {
+            instance: "848._avdecc._tcp.local".to_string(),
+            host: "848.local".to_string(),
+            port: 17221,
+            addresses: vec![
+                "192.168.4.166".to_string(),
+                "fe80::1".to_string(),
+                "fe80::2%eth2".to_string(),
+                "fdf3:b8e1:c9b0:1::1".to_string(),
+            ],
+            txt: Vec::new(),
+        };
+        assert_eq!(
+            browser_control_hosts(&result),
+            vec![
+                "192.168.4.166".to_string(),
+                "[fdf3:b8e1:c9b0:1::1]".to_string(),
+                "[fe80::2%eth2]".to_string(),
+            ]
         );
     }
 

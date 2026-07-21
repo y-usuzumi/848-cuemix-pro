@@ -25,10 +25,33 @@ fn authorizes_only_the_local_page_with_its_session_token() {
 
 #[test]
 fn limits_proxying_to_the_configured_device() {
+    let scope = ServerScope::Configured("192.168.4.166".to_string());
     let params = parse_query("host=192.168.4.166");
-    assert_eq!(allowed_host(&params, "192.168.4.166"), Ok("192.168.4.166"));
+    assert_eq!(
+        allowed_host(&params, &scope),
+        Ok("192.168.4.166".to_string())
+    );
     let params = parse_query("host=192.168.4.1");
-    assert!(allowed_host(&params, "192.168.4.166").is_err());
+    assert!(allowed_host(&params, &scope).is_err());
+}
+
+#[test]
+fn hostless_server_allows_only_discovered_control_addresses() {
+    let scope = ServerScope::Discovered(vec![DiscoveryResult {
+        instance: "848._avdecc._tcp.local".to_string(),
+        host: "848.local".to_string(),
+        port: 17221,
+        addresses: vec!["192.168.4.166".to_string(), "fe80::1".to_string()],
+        txt: Vec::new(),
+    }]);
+    let params = parse_query("host=192.168.4.166");
+    assert_eq!(
+        allowed_host(&params, &scope),
+        Ok("192.168.4.166".to_string())
+    );
+    assert!(allowed_host(&HashMap::new(), &scope).is_err());
+    let params = parse_query("host=192.168.4.1");
+    assert!(allowed_host(&params, &scope).is_err());
 }
 
 #[test]

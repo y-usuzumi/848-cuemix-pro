@@ -70,9 +70,8 @@ pub(crate) fn run() -> Result<(), String> {
             }
         }
         "serve" => {
-            let host = args.next().ok_or("missing device host")?;
-            let options = ServeOptions::parse(args.collect())?;
-            serve(&host, &options.listen, options.timeout)?;
+            let (host, options) = parse_serve_command(args.collect())?;
+            serve(host.as_deref(), &options.listen, options.timeout)?;
         }
         "help" | "--help" | "-h" => print_usage(),
         other => return Err(format!("unknown command '{other}'")),
@@ -304,6 +303,17 @@ impl SetOptions {
     }
 }
 
+fn parse_serve_command(mut args: Vec<String>) -> Result<(Option<String>, ServeOptions), String> {
+    let host = args
+        .first()
+        .filter(|value| !value.starts_with('-'))
+        .cloned();
+    if host.is_some() {
+        args.remove(0);
+    }
+    Ok((host, ServeOptions::parse(args)?))
+}
+
 struct ServeOptions {
     listen: String,
     timeout: Duration,
@@ -385,6 +395,19 @@ mod tests {
             "0001f2fffefeb9e2".to_string(),
         ])
         .is_err());
+    }
+
+    #[test]
+    fn parses_hostless_and_fixed_host_server_commands() {
+        let (host, options) =
+            parse_serve_command(vec!["--listen".to_string(), "127.0.0.1:0".to_string()])
+                .expect("hostless server command");
+        assert_eq!(host, None);
+        assert_eq!(options.listen, "127.0.0.1:0");
+
+        let (host, _) = parse_serve_command(vec!["192.168.4.166".to_string()])
+            .expect("fixed host server command");
+        assert_eq!(host.as_deref(), Some("192.168.4.166"));
     }
 
     #[test]

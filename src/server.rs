@@ -5,6 +5,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
 use crate::device::{datastore_write_request, json_escape, percent_decode, DeviceClient};
+use crate::discovery::{browser_control_hosts, discover_avdecc, DiscoveryResult};
 use crate::probe::{probe_device, probe_result_json};
 use crate::ui;
 
@@ -12,26 +13,44 @@ const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
 const MAX_REQUEST_HEADER_BYTES: usize = 32 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 
-pub(crate) fn serve(default_host: &str, listen: &str, timeout: Duration) -> Result<(), String> {
+enum ServerScope {
+    Configured(String),
+    Discovered(Vec<DiscoveryResult>),
+}
+
+pub(crate) fn serve(
+    default_host: Option<&str>,
+    listen: &str,
+    timeout: Duration,
+) -> Result<(), String> {
     let listen_address = listen
         .parse::<SocketAddr>()
         .map_err(|_| "--listen must be a numeric loopback address, such as 127.0.0.1:8480")?;
     if !listen_address.ip().is_loopback() {
         return Err("the browser control server may only listen on a loopback address".to_string());
     }
+    let scope = match default_host {
+        Some(host) => ServerScope::Configured(host.to_string()),
+        None => ServerScope::Discovered(discover_avdecc(timeout)?),
+    };
     let listener = TcpListener::bind(listen_address)
         .map_err(|error| format!("listen on {listen_address} failed: {error}"))?;
     let expected_origin = listener_origin(&listener)?;
     let session_token = new_session_token()?;
     println!("cuemix-848 UI: {expected_origin}");
-    println!("default device: {default_host}");
+    match &scope {
+        ServerScope::Configured(host) => println!("default device: {host}"),
+        ServerScope::Discovered(devices) => {
+            println!("discovered devices: {}", devices.len());
+        }
+    }
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 if let Err(error) = handle_browser_request(
                     stream,
-                    default_host,
+                    &scope,
                     &expected_origin,
                     &session_token,
                     timeout,
@@ -66,7 +85,7 @@ fn new_session_token() -> Result<String, String> {
 
 fn handle_browser_request(
     mut stream: TcpStream,
-    default_host: &str,
+    scope: &ServerScope,
     expected_origin: &str,
     session_token: &str,
     timeout: Duration,
@@ -84,7 +103,7 @@ fn handle_browser_request(
             &request.target,
             &request.body,
             request.origin.as_deref(),
-            default_host,
+            scope,
             expected_origin,
             session_token,
             timeout,
@@ -249,23 +268,36 @@ fn route_browser_request(
     target: &str,
     body: &str,
     origin: Option<&str>,
-    default_host: &str,
+    scope: &ServerScope,
     expected_origin: &str,
     session_token: &str,
     timeout: Duration,
 ) -> BrowserResponse {
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     match (method, path) {
-        ("GET", "/") => BrowserResponse {
-            status: 200,
-            content_type: "text/html; charset=utf-8",
-            body: ui::render(default_host, session_token),
-        },
+        ("GET", "/") => {
+            let params = parse_query(query);
+            match scope {
+                ServerScope::Discovered(devices) if !params.contains_key("host") => {
+                    BrowserResponse {
+                        status: 200,
+                        content_type: "text/html; charset=utf-8",
+                        body: ui::render_discovery(devices),
+                    }
+                }
+                _ => match allowed_host(&params, scope) {
+                    Ok(host) => BrowserResponse {
+                        status: 200,
+                        content_type: "text/html; charset=utf-8",
+                        body: ui::render(&host, session_token),
+                    },
+                    Err(error) => json_error(400, &error),
+                },
+            }
+        }
         ("GET", "/api/probe") => {
             let params = parse_query(query);
-            match allowed_host(&params, default_host)
-                .and_then(|host| DeviceClient::new(host, timeout))
-            {
+            match allowed_host(&params, scope).and_then(|host| DeviceClient::new(&host, timeout)) {
                 Ok(client) => {
                     let results = probe_device(&client);
                     let body = format!(
@@ -283,7 +315,7 @@ fn route_browser_request(
         }
         ("GET", "/api/get") => {
             let params = parse_query(query);
-            proxy_get_or_error(&params, default_host, timeout)
+            proxy_get_or_error(&params, scope, timeout)
         }
         ("POST", "/api/set") => {
             let mut params = parse_query(query);
@@ -291,7 +323,7 @@ fn route_browser_request(
             if !is_authorized(origin, params.get("token"), expected_origin, session_token) {
                 return json_error(403, "invalid origin or session token");
             }
-            proxy_set_or_error(&params, default_host, timeout)
+            proxy_set_or_error(&params, scope, timeout)
         }
         _ => BrowserResponse {
             status: 404,
@@ -321,34 +353,47 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
         == 0
 }
 
-fn allowed_host<'a>(
-    params: &'a HashMap<String, String>,
-    default_host: &'a str,
-) -> Result<&'a str, String> {
-    match params.get("host") {
-        None => Ok(default_host),
-        Some(host) if host == default_host => Ok(default_host),
-        Some(_) => Err("this server is limited to its configured device host".to_string()),
+fn allowed_host(params: &HashMap<String, String>, scope: &ServerScope) -> Result<String, String> {
+    match scope {
+        ServerScope::Configured(default_host) => match params.get("host") {
+            None => Ok(default_host.clone()),
+            Some(host) if host == default_host => Ok(default_host.clone()),
+            Some(_) => Err("this server is limited to its configured device host".to_string()),
+        },
+        ServerScope::Discovered(devices) => {
+            let host = params
+                .get("host")
+                .ok_or("select a discovered device before using the control API")?;
+            if devices
+                .iter()
+                .flat_map(browser_control_hosts)
+                .any(|candidate| candidate == *host)
+            {
+                Ok(host.clone())
+            } else {
+                Err("this server is limited to addresses discovered at startup".to_string())
+            }
+        }
     }
 }
 
 fn proxy_get_or_error(
     params: &HashMap<String, String>,
-    default_host: &str,
+    scope: &ServerScope,
     timeout: Duration,
 ) -> BrowserResponse {
     let Some(path) = params.get("path") else {
         return json_error(400, "missing path");
     };
-    match allowed_host(params, default_host) {
-        Ok(host) => proxy_request(host, "GET", path, None, timeout),
+    match allowed_host(params, scope) {
+        Ok(host) => proxy_request(&host, "GET", path, None, timeout),
         Err(error) => json_error(400, &error),
     }
 }
 
 fn proxy_set_or_error(
     params: &HashMap<String, String>,
-    default_host: &str,
+    scope: &ServerScope,
     timeout: Duration,
 ) -> BrowserResponse {
     let Some(path) = params.get("path") else {
@@ -361,7 +406,7 @@ fn proxy_set_or_error(
     if method != "POST" && method != "PATCH" {
         return json_error(400, "method must be POST or PATCH");
     }
-    let host = match allowed_host(params, default_host) {
+    let host = match allowed_host(params, scope) {
         Ok(host) => host,
         Err(error) => return json_error(400, &error),
     };
@@ -369,7 +414,7 @@ fn proxy_set_or_error(
         Ok(request) => request,
         Err(error) => return json_error(400, &error),
     };
-    proxy_request(host, method, &request_path, Some(&body), timeout)
+    proxy_request(&host, method, &request_path, Some(&body), timeout)
 }
 
 fn proxy_request(
