@@ -113,9 +113,7 @@ fn parse_device_address(host: &str) -> Result<(String, String), String> {
             .find(']')
             .ok_or("unterminated bracketed IPv6 address")?;
         let address = &rest[..closing];
-        address
-            .parse::<Ipv6Addr>()
-            .map_err(|_| "invalid bracketed IPv6 address")?;
+        validate_scoped_ipv6(address).map_err(|_| "invalid bracketed IPv6 address")?;
         let suffix = &rest[closing + 1..];
         let port = if suffix.is_empty() {
             "80"
@@ -128,15 +126,15 @@ fn parse_device_address(host: &str) -> Result<(String, String), String> {
         port.parse::<u16>()
             .map_err(|_| "invalid bracketed IPv6 port")?;
         let host_header = if port == "80" {
-            format!("[{address}]")
+            http_ipv6_host(address)
         } else {
-            format!("[{address}]:{port}")
+            format!("{}:{port}", http_ipv6_host(address))
         };
         return Ok((host_header, format!("[{address}]:{port}")));
     }
 
-    if host.parse::<Ipv6Addr>().is_ok() {
-        return Ok((format!("[{host}]"), format!("[{host}]:80")));
+    if validate_scoped_ipv6(host).is_ok() {
+        return Ok((http_ipv6_host(host), format!("[{host}]:80")));
     }
 
     if let Some((name, port)) = host.rsplit_once(':') {
@@ -147,6 +145,29 @@ fn parse_device_address(host: &str) -> Result<(String, String), String> {
     }
 
     Ok((host.to_string(), format!("{host}:80")))
+}
+
+fn validate_scoped_ipv6(address: &str) -> Result<(), ()> {
+    let (address, scope) = match address.split_once('%') {
+        Some((address, scope)) => (address, Some(scope)),
+        None => (address, None),
+    };
+    address.parse::<Ipv6Addr>().map_err(|_| ())?;
+    if let Some(scope) = scope {
+        if scope.is_empty()
+            || scope.contains('%')
+            || !scope.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+            })
+        {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+fn http_ipv6_host(address: &str) -> String {
+    format!("[{}]", address.replace('%', "%25"))
 }
 
 fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, String> {
@@ -466,7 +487,15 @@ mod tests {
                 "[2604:4080:1503:8036::1]:8080".to_string()
             ))
         );
+        assert_eq!(
+            parse_device_address("[fe80::1%eth2]:8080"),
+            Ok((
+                "[fe80::1%25eth2]:8080".to_string(),
+                "[fe80::1%eth2]:8080".to_string()
+            ))
+        );
         assert!(DeviceClient::new("http://848.local/control", Duration::from_secs(1)).is_err());
+        assert!(parse_device_address("[fe80::1%bad/scope]").is_err());
     }
 
     #[test]

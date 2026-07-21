@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, UdpSocket};
-use std::process::Command;
-use std::time::Duration;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV6, UdpSocket};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::device::json_escape;
 
@@ -15,17 +15,24 @@ pub(crate) struct DiscoveryResult {
     txt: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Default)]
-struct AvahiDiscoveryBuilder {
+struct DiscoveryBuilder {
     addresses: BTreeSet<String>,
     txt: BTreeSet<String>,
 }
 
 enum DnsRecordData {
     Domain(String),
-    Srv { port: u16, target: String },
+    Srv {
+        port: u16,
+        target: String,
+    },
     Txt(Vec<String>),
-    Address(IpAddr),
+    Address {
+        address: IpAddr,
+        scope: Option<String>,
+    },
     Other,
 }
 
@@ -34,150 +41,157 @@ struct DnsRecord {
     data: DnsRecordData,
 }
 
+struct DiscoverySocket {
+    socket: UdpSocket,
+    scope: Option<String>,
+}
+
+struct MulticastInterface {
+    name: String,
+    index: u32,
+}
+
 pub(crate) fn discover_avdecc(timeout: Duration) -> Result<Vec<DiscoveryResult>, String> {
-    let native_results = discover_avdecc_native(timeout)?;
-    // Avahi can discover services advertised only on IPv6, which the native
-    // stdlib-only probe cannot reliably multicast to without interface setup.
-    let avahi_results = discover_avdecc_with_avahi()?;
-    Ok(merge_discovery_results(native_results, avahi_results))
+    discover_avdecc_native(timeout)
 }
 
 fn discover_avdecc_native(timeout: Duration) -> Result<Vec<DiscoveryResult>, String> {
     const SERVICE: &str = "_avdecc._tcp.local";
-    let socket =
-        UdpSocket::bind("0.0.0.0:0").map_err(|err| format!("bind mDNS socket failed: {err}"))?;
-    socket
-        .set_read_timeout(Some(timeout))
-        .map_err(|err| format!("set mDNS timeout failed: {err}"))?;
-    socket
-        .send_to(&mdns_query(SERVICE), "224.0.0.251:5353")
-        .map_err(|err| format!("send mDNS query failed: {err}"))?;
+    let query = mdns_query(SERVICE);
+    let ipv4 = UdpSocket::bind("0.0.0.0:0")
+        .map_err(|err| format!("bind IPv4 mDNS socket failed: {err}"))?;
+    ipv4.set_nonblocking(true)
+        .map_err(|err| format!("set IPv4 mDNS nonblocking mode failed: {err}"))?;
+    ipv4.send_to(&query, "224.0.0.251:5353")
+        .map_err(|err| format!("send IPv4 mDNS query failed: {err}"))?;
+
+    let mut sockets = vec![DiscoverySocket {
+        socket: ipv4,
+        scope: None,
+    }];
+    for interface in ipv6_multicast_interfaces() {
+        let socket = match UdpSocket::bind("[::]:0") {
+            Ok(socket) => socket,
+            Err(error) => {
+                eprintln!(
+                    "ignoring IPv6 mDNS interface {}: bind failed: {error}",
+                    interface.name
+                );
+                continue;
+            }
+        };
+        if let Err(error) = socket.set_nonblocking(true) {
+            eprintln!(
+                "ignoring IPv6 mDNS interface {}: set nonblocking mode failed: {error}",
+                interface.name
+            );
+            continue;
+        }
+        let destination = SocketAddrV6::new(
+            Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x00fb),
+            5353,
+            0,
+            interface.index,
+        );
+        if let Err(error) = socket.send_to(&query, destination) {
+            eprintln!(
+                "ignoring IPv6 mDNS interface {}: send query failed: {error}",
+                interface.name
+            );
+            continue;
+        }
+        sockets.push(DiscoverySocket {
+            socket,
+            scope: Some(interface.name),
+        });
+    }
 
     let mut records = Vec::new();
+    let deadline = Instant::now() + timeout;
     let mut buffer = [0u8; 9000];
     loop {
-        match socket.recv_from(&mut buffer) {
-            Ok((bytes, _)) => match parse_dns_records(&buffer[..bytes]) {
-                Ok(packet_records) => records.extend(packet_records),
-                Err(error) => eprintln!("ignoring malformed mDNS response: {error}"),
-            },
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                ) =>
-            {
-                break;
+        let mut received = false;
+        for socket in &sockets {
+            loop {
+                match socket.socket.recv_from(&mut buffer) {
+                    Ok((bytes, _)) => {
+                        received = true;
+                        match parse_dns_records_scoped(&buffer[..bytes], socket.scope.as_deref()) {
+                            Ok(packet_records) => records.extend(packet_records),
+                            Err(error) => eprintln!("ignoring malformed mDNS response: {error}"),
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) => {
+                        eprintln!("ignoring mDNS receive error: {error}");
+                        break;
+                    }
+                }
             }
-            Err(error) => return Err(format!("read mDNS response failed: {error}")),
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining == Duration::ZERO {
+            break;
+        }
+        if !received {
+            thread::sleep(remaining.min(Duration::from_millis(10)));
         }
     }
     Ok(build_discovery_results(records, SERVICE))
 }
 
-fn discover_avdecc_with_avahi() -> Result<Vec<DiscoveryResult>, String> {
-    let output = match Command::new("avahi-browse")
-        .args(["--parsable", "--resolve", "--terminate", "_avdecc._tcp"])
-        .output()
-    {
-        Ok(output) if output.status.success() => output,
-        Ok(_) | Err(_) => return Ok(Vec::new()),
-    };
-    Ok(parse_avahi_discovery(&String::from_utf8_lossy(
-        &output.stdout,
-    )))
-}
+fn ipv6_multicast_interfaces() -> Vec<MulticastInterface> {
+    const IFF_UP: u32 = 0x1;
+    const IFF_LOOPBACK: u32 = 0x8;
+    const IFF_MULTICAST: u32 = 0x1000;
 
-fn parse_avahi_discovery(output: &str) -> Vec<DiscoveryResult> {
-    let mut devices: BTreeMap<(String, String, u16), AvahiDiscoveryBuilder> = BTreeMap::new();
-
-    for line in output.lines() {
-        let parts = line.split(';').collect::<Vec<_>>();
-        if parts.first() != Some(&"=") || parts.len() < 10 || parts[4] != "_avdecc._tcp" {
-            continue;
+    let entries = match std::fs::read_dir("/sys/class/net") {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("native IPv6 mDNS interface enumeration unavailable: {error}");
+            return Vec::new();
         }
-        let Ok(port) = parts[8].parse::<u16>() else {
+    };
+    let mut interfaces = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        let instance = avahi_unescape(parts[3]);
-        let host = avahi_unescape(parts[6]);
-        let address = avahi_unescape(parts[7]);
-        let txt = parse_avahi_txt(&parts[9..].join(";"));
-        let entry = devices.entry((instance, host, port)).or_default();
-        entry.addresses.insert(address);
-        entry.txt.extend(txt);
-    }
-
-    devices
-        .into_iter()
-        .map(|((instance, host, port), builder)| DiscoveryResult {
-            instance,
-            host,
-            port,
-            addresses: builder.addresses.into_iter().collect(),
-            txt: builder.txt.into_iter().collect(),
-        })
-        .collect()
-}
-
-fn merge_discovery_results(
-    first: Vec<DiscoveryResult>,
-    second: Vec<DiscoveryResult>,
-) -> Vec<DiscoveryResult> {
-    let mut merged: BTreeMap<(String, String, u16), AvahiDiscoveryBuilder> = BTreeMap::new();
-    for result in first.into_iter().chain(second) {
-        let entry = merged
-            .entry((result.instance, result.host, result.port))
-            .or_default();
-        entry.addresses.extend(result.addresses);
-        entry.txt.extend(result.txt);
-    }
-    merged
-        .into_iter()
-        .map(|((instance, host, port), builder)| DiscoveryResult {
-            instance,
-            host,
-            port,
-            addresses: builder.addresses.into_iter().collect(),
-            txt: builder.txt.into_iter().collect(),
-        })
-        .collect()
-}
-
-fn avahi_unescape(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'\\'
-            && index + 3 < bytes.len()
-            && bytes[index + 1..index + 4].iter().all(u8::is_ascii_digit)
+        if name.is_empty()
+            || !name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+            })
         {
-            let digits = std::str::from_utf8(&bytes[index + 1..index + 4]).unwrap_or("");
-            if let Ok(value) = digits.parse::<u8>() {
-                out.push(value);
-                index += 4;
-                continue;
-            }
+            continue;
         }
-        out.push(bytes[index]);
-        index += 1;
+        let flags = std::fs::read_to_string(format!("/sys/class/net/{name}/flags"))
+            .ok()
+            .and_then(|value| parse_interface_flags(&value));
+        let Some(flags) = flags else {
+            continue;
+        };
+        if flags & (IFF_UP | IFF_MULTICAST) != IFF_UP | IFF_MULTICAST || flags & IFF_LOOPBACK != 0 {
+            continue;
+        }
+        let index = std::fs::read_to_string(format!("/sys/class/net/{name}/ifindex"))
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .filter(|index| *index != 0);
+        if let Some(index) = index {
+            interfaces.push(MulticastInterface { name, index });
+        }
     }
-    String::from_utf8_lossy(&out).to_string()
+    interfaces.sort_by(|left, right| left.name.cmp(&right.name));
+    interfaces
 }
 
-fn parse_avahi_txt(input: &str) -> Vec<String> {
-    let quoted = input
-        .split('"')
-        .enumerate()
-        .filter(|(index, _)| *index % 2 == 1)
-        .map(|(_, value)| avahi_unescape(value))
-        .collect::<Vec<_>>();
-    if quoted.is_empty() && !input.is_empty() {
-        vec![avahi_unescape(input)]
-    } else {
-        quoted
-    }
+fn parse_interface_flags(value: &str) -> Option<u32> {
+    let value = value.trim();
+    let value = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    u32::from_str_radix(value, 16).ok()
 }
 
 fn mdns_query(name: &str) -> Vec<u8> {
@@ -188,7 +202,10 @@ fn mdns_query(name: &str) -> Vec<u8> {
     message
 }
 
-fn parse_dns_records(bytes: &[u8]) -> Result<Vec<DnsRecord>, String> {
+fn parse_dns_records_scoped(
+    bytes: &[u8],
+    interface_scope: Option<&str>,
+) -> Result<Vec<DnsRecord>, String> {
     if bytes.len() < 12 {
         return Err("mDNS response shorter than DNS header".to_string());
     }
@@ -220,19 +237,25 @@ fn parse_dns_records(bytes: &[u8]) -> Result<Vec<DnsRecord>, String> {
             .filter(|end| *end <= bytes.len())
             .ok_or("truncated mDNS record")?;
         let data = match record_type {
-            1 if rdata_len == 4 => DnsRecordData::Address(IpAddr::V4(Ipv4Addr::new(
-                bytes[rdata_start],
-                bytes[rdata_start + 1],
-                bytes[rdata_start + 2],
-                bytes[rdata_start + 3],
-            ))),
+            1 if rdata_len == 4 => DnsRecordData::Address {
+                address: IpAddr::V4(Ipv4Addr::new(
+                    bytes[rdata_start],
+                    bytes[rdata_start + 1],
+                    bytes[rdata_start + 2],
+                    bytes[rdata_start + 3],
+                )),
+                scope: None,
+            },
             12 => DnsRecordData::Domain(read_dns_name(bytes, rdata_start)?.0),
             16 => DnsRecordData::Txt(parse_dns_txt(&bytes[rdata_start..rdata_end])),
             28 if rdata_len == 16 => {
                 let octets: [u8; 16] = bytes[rdata_start..rdata_end]
                     .try_into()
                     .map_err(|_| "invalid mDNS AAAA record")?;
-                DnsRecordData::Address(IpAddr::V6(Ipv6Addr::from(octets)))
+                DnsRecordData::Address {
+                    address: IpAddr::V6(Ipv6Addr::from(octets)),
+                    scope: interface_scope.map(str::to_string),
+                }
             }
             33 if rdata_len >= 6 => DnsRecordData::Srv {
                 port: read_u16(bytes, rdata_start + 4)?,
@@ -333,11 +356,11 @@ fn build_discovery_results(records: Vec<DnsRecord>, service: &str) -> Vec<Discov
                 instances.insert(name.clone());
                 txt_records.insert(name, values);
             }
-            DnsRecordData::Address(address) => {
+            DnsRecordData::Address { address, scope } => {
                 addresses
                     .entry(name)
                     .or_default()
-                    .insert(address.to_string());
+                    .insert(discovery_address(address, scope.as_deref()));
             }
             _ => {}
         }
@@ -358,6 +381,40 @@ fn build_discovery_results(records: Vec<DnsRecord>, service: &str) -> Vec<Discov
                 port,
                 txt,
             })
+        })
+        .collect()
+}
+
+fn discovery_address(address: IpAddr, scope: Option<&str>) -> String {
+    match (address, scope) {
+        (IpAddr::V6(address), Some(scope)) if address.is_unicast_link_local() => {
+            format!("{address}%{scope}")
+        }
+        (address, _) => address.to_string(),
+    }
+}
+
+#[cfg(test)]
+fn merge_discovery_results(
+    first: Vec<DiscoveryResult>,
+    second: Vec<DiscoveryResult>,
+) -> Vec<DiscoveryResult> {
+    let mut merged: BTreeMap<(String, String, u16), DiscoveryBuilder> = BTreeMap::new();
+    for result in first.into_iter().chain(second) {
+        let entry = merged
+            .entry((result.instance, result.host, result.port))
+            .or_default();
+        entry.addresses.extend(result.addresses);
+        entry.txt.extend(result.txt);
+    }
+    merged
+        .into_iter()
+        .map(|((instance, host, port), builder)| DiscoveryResult {
+            instance,
+            host,
+            port,
+            addresses: builder.addresses.into_iter().collect(),
+            txt: builder.txt.into_iter().collect(),
         })
         .collect()
 }
@@ -425,7 +482,10 @@ mod tests {
                 },
                 DnsRecord {
                     name: host,
-                    data: DnsRecordData::Address(IpAddr::V4(Ipv4Addr::new(192, 168, 4, 166))),
+                    data: DnsRecordData::Address {
+                        address: IpAddr::V4(Ipv4Addr::new(192, 168, 4, 166)),
+                        scope: None,
+                    },
                 },
             ],
             "_avdecc._tcp.local",
@@ -447,16 +507,47 @@ mod tests {
     }
 
     #[test]
-    fn parses_avahi_avdecc_record() {
-        let output = r#"=;eth2;IPv4;848\032\040848AFEB9E2\041;_avdecc._tcp;local;848AFEB9E2.local;192.168.4.166;17221;"Version=1" "Manufacturer=MOTU" "com.motu.type=proaudiov2""#;
-        let results = parse_avahi_discovery(output);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].instance, "848 (848AFEB9E2)");
-        assert_eq!(results[0].host, "848AFEB9E2.local");
-        assert_eq!(results[0].addresses, vec!["192.168.4.166"]);
-        assert_eq!(
-            results[0].txt,
-            vec!["Manufacturer=MOTU", "Version=1", "com.motu.type=proaudiov2"]
+    fn retains_scope_for_link_local_ipv6_addresses() {
+        let instance = "848._avdecc._tcp.local".to_string();
+        let host = "848afeb9e2.local".to_string();
+        let results = build_discovery_results(
+            vec![
+                DnsRecord {
+                    name: "_avdecc._tcp.local".to_string(),
+                    data: DnsRecordData::Domain(instance.clone()),
+                },
+                DnsRecord {
+                    name: instance,
+                    data: DnsRecordData::Srv {
+                        port: 17221,
+                        target: host.clone(),
+                    },
+                },
+                DnsRecord {
+                    name: host,
+                    data: DnsRecordData::Address {
+                        address: IpAddr::V6(Ipv6Addr::LOCALHOST),
+                        scope: Some("eth2".to_string()),
+                    },
+                },
+                DnsRecord {
+                    name: "848afeb9e2.local".to_string(),
+                    data: DnsRecordData::Address {
+                        address: IpAddr::V6("fe80::1".parse().unwrap()),
+                        scope: Some("eth2".to_string()),
+                    },
+                },
+            ],
+            "_avdecc._tcp.local",
         );
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].addresses, vec!["::1", "fe80::1%eth2"]);
+    }
+
+    #[test]
+    fn parses_linux_interface_flags() {
+        assert_eq!(parse_interface_flags("0x1003\n"), Some(0x1003));
+        assert_eq!(parse_interface_flags("1003"), Some(0x1003));
+        assert_eq!(parse_interface_flags("not-a-flag"), None);
     }
 }

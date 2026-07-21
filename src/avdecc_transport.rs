@@ -49,9 +49,7 @@ pub(super) fn parse_proxy_address(host: &str) -> Result<ProxyAddress, String> {
             .find(']')
             .ok_or("unterminated bracketed IPv6 AVDECC Proxy host")?;
         let address = &rest[..closing];
-        address
-            .parse::<Ipv6Addr>()
-            .map_err(|_| "invalid bracketed IPv6 AVDECC Proxy host")?;
+        validate_scoped_ipv6(address).map_err(|_| "invalid bracketed IPv6 AVDECC Proxy host")?;
         let suffix = &rest[closing + 1..];
         let port = if suffix.is_empty() {
             17221
@@ -63,13 +61,13 @@ pub(super) fn parse_proxy_address(host: &str) -> Result<ProxyAddress, String> {
                 .map_err(|_| "invalid AVDECC Proxy port")?
         };
         return Ok(ProxyAddress {
-            host_header: format!("[{address}]:{port}"),
+            host_header: format!("{}:{port}", http_ipv6_host(address)),
             socket_address: format!("[{address}]:{port}"),
         });
     }
-    if host.parse::<Ipv6Addr>().is_ok() {
+    if validate_scoped_ipv6(host).is_ok() {
         return Ok(ProxyAddress {
-            host_header: format!("[{host}]:17221"),
+            host_header: format!("{}:17221", http_ipv6_host(host)),
             socket_address: format!("[{host}]:17221"),
         });
     }
@@ -86,6 +84,29 @@ pub(super) fn parse_proxy_address(host: &str) -> Result<ProxyAddress, String> {
         host_header: format!("{host}:17221"),
         socket_address: format!("{host}:17221"),
     })
+}
+
+fn validate_scoped_ipv6(address: &str) -> Result<(), ()> {
+    let (address, scope) = match address.split_once('%') {
+        Some((address, scope)) => (address, Some(scope)),
+        None => (address, None),
+    };
+    address.parse::<Ipv6Addr>().map_err(|_| ())?;
+    if let Some(scope) = scope {
+        if scope.is_empty()
+            || scope.contains('%')
+            || !scope.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+            })
+        {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+fn http_ipv6_host(address: &str) -> String {
+    format!("[{}]", address.replace('%', "%25"))
 }
 
 pub(super) fn validate_proxy_path(path: &str) -> Result<(), String> {

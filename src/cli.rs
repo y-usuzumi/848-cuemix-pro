@@ -92,7 +92,7 @@ fn print_usage() {
            cuemix-848 set <host> <datastore-path> <value> [--method POST|PATCH] [--timeout-ms n]\n\
            cuemix-848 serve <host> [--listen 127.0.0.1:8480] [--timeout-ms n]\n\n\
          Host may be an IPv4 address, hostname, host:port, or http://host:port.\n\
-         Use [ipv6-address] or [ipv6-address]:port for IPv6 hosts."
+         Use [ipv6-address] or [ipv6-address]:port for IPv6 hosts; link-local IPv6 may include a scope, for example [fe80::1%eth2]."
     );
 }
 

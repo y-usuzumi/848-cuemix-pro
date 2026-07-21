@@ -57,6 +57,10 @@ fn parses_proxy_addresses() {
     let address = parse_proxy_address("[fe80::1]:17221").unwrap();
     assert_eq!(address.host_header, "[fe80::1]:17221");
     assert_eq!(address.socket_address, "[fe80::1]:17221");
+
+    let scoped = parse_proxy_address("[fe80::1%eth2]:17221").unwrap();
+    assert_eq!(scoped.host_header, "[fe80::1%25eth2]:17221");
+    assert_eq!(scoped.socket_address, "[fe80::1%eth2]:17221");
 }
 
 #[test]

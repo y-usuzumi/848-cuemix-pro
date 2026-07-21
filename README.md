@@ -32,9 +32,11 @@ Discover any 848 advertising the standard AVDECC mDNS service:
 cargo run -- discover
 ```
 
-Discovery uses a native IPv4 mDNS query and also merges results from the
-standard Linux `avahi-browse` utility when it is installed. Avahi is currently
-needed to discover IPv6-only advertisements.
+Discovery sends the native mDNS query over IPv4 and, on Linux, over IPv6
+link-local multicast on every up, multicast-capable non-loopback interface.
+It does not require Avahi. IPv6 link-local answers retain their interface scope
+in discovery output, for example `fe80::1%eth2`; pass that form in brackets to
+a command, such as `[fe80::1%eth2]` or `[fe80::1%eth2]:17221`.
 
 Validate an advertised AVDECC Proxy endpoint without sending an AVDECC or
 device-control command:
