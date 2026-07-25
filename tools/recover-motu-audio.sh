@@ -12,16 +12,17 @@ DISABLE_WIREPLUMBER_ROUTE_RESTORE=false
 USE_NATIVE_VOLUME=false
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# The native path is isolated because it owns transient PipeWire activation.
+# The native path is isolated because it owns DSP graph configuration checks.
 source "$SCRIPT_DIR/motu-native-volume.sh"
 
 usage() {
   cat <<'EOF'
 Usage: recover-motu-audio.sh [--check] [--disable-wireplumber-route-restore]
-                             [--native-volume]
+                             [--native-dsp]
 
-Restores the intended VirtualSink loopback and verifies that the 848 PipeWire
-sink remains at 100%. It does not reset the 848 card profile by default.
+Restores the intended VirtualSink loopback. Normal mode verifies the 848
+PipeWire sink at 100%; native DSP mode bypasses its stale Pulse volume metadata.
+The script does not reset the 848 card profile by default.
 
 Options:
   --check                         Report the 848 profile, USB mixer, and
@@ -30,9 +31,9 @@ Options:
                                   Disable WirePlumber device-route restoration
                                   for this WirePlumber session. This affects all
                                   devices until WirePlumber restarts.
-  --native-volume                 Set every native PipeWire channel directly,
-                                  bypassing the 32-channel Pulse view. This is
-                                  intended for the 848's 128-channel sink.
+  --native-dsp                    Configure the 848's 128-channel DSP ports and
+                                  route VirtualSink.output directly to them.
+  --native-volume                 Compatibility alias for --native-dsp.
   -h, --help                      Show this help.
 EOF
 }
@@ -215,14 +216,19 @@ sink_input_mute_state() {
 sink_input_is_full_scale() {
   local input_id="$1"
 
-  pactl get-sink-input-volume "$input_id" | awk '
-    {
+  pactl list sink-inputs | awk -v input_id="$input_id" '
+    /^Sink Input #[0-9]+$/ {
+      if (in_input) exit
+      in_input = $3 == "#" input_id
+    }
+    in_input && /^[[:space:]]*Volume:/ {
       for (field = 2; field <= NF; field += 1) {
         if ($(field - 1) == "/" && $field ~ /^[0-9]+%$/) {
           saw_volume = 1
           if ($field != "100%") bad_volume = 1
         }
       }
+      exit
     }
     END { exit !saw_volume || bad_volume }
   '
@@ -322,6 +328,7 @@ preflight() {
 
 check() {
   local card
+  local loopback_id=""
   local status=0
 
   preflight false
@@ -341,6 +348,18 @@ check() {
   elif sink_is_full_scale "$MOTU_SINK" && sink_is_unmuted "$MOTU_SINK"; then
     echo "MOTU PipeWire volume: $(sink_volume_summary "$MOTU_SINK")"
     echo "MOTU PipeWire sink: 100% and unmuted"
+  elif ! command -v jq >/dev/null 2>&1 || ! command -v pw-dump >/dev/null 2>&1; then
+    echo "MOTU PipeWire volume: $(sink_volume_summary "$MOTU_SINK")"
+    echo "Cannot verify native DSP state without jq and pw-dump" >&2
+    status=1
+  elif loopback_id="$(single_loopback_sink_input_id)" \
+    && native_dsp_volume_bypass_is_ready \
+    && native_loopback_links_are_active \
+    && sink_is_unmuted "$MOTU_SINK" \
+    && sink_input_is_full_scale "$loopback_id" \
+    && sink_input_is_unmuted "$loopback_id"; then
+    echo "MOTU PipeWire volume metadata: $(sink_volume_summary "$MOTU_SINK")"
+    echo "MOTU PipeWire sink: native DSP bypass active through $LOOPBACK_NODE"
   else
     echo "MOTU PipeWire volume: $(sink_volume_summary "$MOTU_SINK")"
     echo "MOTU PipeWire sink: not 100% and unmuted; recovery is needed" >&2
@@ -359,8 +378,12 @@ verify_recovery() {
     status=1
   fi
   if [ "$USE_NATIVE_VOLUME" = true ]; then
-    if ! native_soft_volumes_are_full_scale; then
-      echo "848 native soft volumes did not remain full scale" >&2
+    if ! native_dsp_volume_bypass_is_ready; then
+      echo "848 native DSP volume bypass is not ready" >&2
+      status=1
+    fi
+    if ! native_loopback_links_are_active; then
+      echo "VirtualSink.output does not have two active DSP links to the 848" >&2
       status=1
     fi
   elif ! sink_is_full_scale "$MOTU_SINK"; then
@@ -406,35 +429,23 @@ recover() {
   echo "Routing VirtualSink.output to the MOTU..."
   route_loopback_to_motu "$loopback_id"
 
-  echo "Restoring the 848 USB and PipeWire playback volume..."
+  echo "Restoring the 848 USB playback path..."
   amixer -c "$card" sset 'Audio Out' 100% unmute >/dev/null
   pactl set-sink-mute "$MOTU_SINK" 0
   if [ "$USE_NATIVE_VOLUME" = true ]; then
-    trap 'stop_silent_motu_activator' EXIT
-    trap 'stop_silent_motu_activator; exit 130' INT
-    trap 'stop_silent_motu_activator; exit 143' TERM
-    echo "Waking the 848 playback path with silence..."
-    start_silent_motu_activator
-    if ! wait_for_active_native_path; then
+    echo "Configuring the 848 native DSP ports..."
+    if ! configure_native_dsp_ports; then
       return 1
     fi
-    echo "Setting all native PipeWire soft playback channels..."
-    if ! set_native_full_scale_soft_volume || ! wait_for_native_full_scale_volume; then
+    echo "Verifying the VirtualSink DSP links..."
+    if ! wait_for_native_loopback_links; then
       return 1
     fi
     if ! verify_recovery "$card" "$loopback_id"; then
       return 1
     fi
-    # Stop the silent stream, wait for a stable usable node state, then confirm
-    # the native setting survived without relying on the activator.
-    stop_silent_motu_activator
-    if ! wait_for_native_node_to_settle \
-      || ! native_soft_volumes_are_full_scale; then
-      echo "848 native soft volumes did not survive the silent activation stream" >&2
-      return 1
-    fi
-    trap - EXIT INT TERM
   else
+    echo "Restoring the 848 PipeWire sink volume..."
     pactl set-sink-volume "$MOTU_SINK" 100%
     wait_for_full_scale_sink
     verify_recovery "$card" "$loopback_id"
@@ -452,7 +463,7 @@ parse_args() {
       --disable-wireplumber-route-restore)
         DISABLE_WIREPLUMBER_ROUTE_RESTORE=true
         ;;
-      --native-volume)
+      --native-dsp|--native-volume)
         USE_NATIVE_VOLUME=true
         ;;
       -h|--help)
@@ -482,11 +493,8 @@ main() {
   fi
   if [ "$USE_NATIVE_VOLUME" = true ]; then
     require_cmd jq
-    require_cmd mktemp
-    require_cmd pw-cat
     require_cmd pw-cli
     require_cmd pw-dump
-    require_cmd timeout
   fi
 
   if [ "$CHECK_ONLY" = true ]; then

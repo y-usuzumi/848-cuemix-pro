@@ -22,7 +22,7 @@ and is served by the same binary.
 - `src/server.rs`: local browser proxy and API routes.
 - `src/ui.rs` and `src/ui.html`: browser UI template and renderer.
 - `tools/recover-motu-audio.sh`: opt-in PipeWire recovery for the 848's
-  full-scale USB playback path; its native activation and `softVolumes`
+  full-scale USB playback path; its native DSP-port and graph-verification
   helpers live in `tools/motu-native-volume.sh` and are sourced, not run
   directly.
 - `tools/enable-motu-soft-mixer.sh`: opt-in per-device WirePlumber rule for
@@ -43,7 +43,9 @@ and is served by the same binary.
   changes the 848 USB Audio Out mixer, PipeWire sink, and `VirtualSink` loopback
   route; do not run it as automated verification. The optional
   `--disable-wireplumber-route-restore` switch affects every WirePlumber device
-  route until WirePlumber restarts.
+  route until WirePlumber restarts. The `--native-dsp` mode also replaces the
+  848 adapter's session-scoped PortConfig with 128 F32P DSP input ports; its
+  older `--native-volume` name is retained only as a compatibility alias.
 - `tools/enable-motu-soft-mixer.sh --install` writes a per-device WirePlumber
   rule and restarts WirePlumber, interrupting audio streams. Do not run it as
   automated verification.

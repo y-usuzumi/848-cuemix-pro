@@ -337,17 +337,18 @@ tools/recover-motu-audio.sh --disable-wireplumber-route-restore
 
 The 848's PipeWire node advertises 128 native playback channels while its
 Pulse-compatible sink exposes only 32. If a regular recovery still snaps back
-to zero, use the experimental native path to apply software volume to all 128
-advertised channels without using PipeWire's faulty hardware-volume mapping. It
-briefly sends zero-valued `S32LE` PCM in the 848's exact 128-channel native
-format so the node is active before changing `softVolumes`; the dormant
-`VirtualSink.output` route is validated by its retained target metadata. The
-script then confirms that the setting survives after the silent stream exits
-and the node reaches a stable usable state:
+to zero, use the experimental native DSP path. It configures the adapter's
+session-scoped 128-channel F32P input ports, then verifies that the full-scale,
+unmuted `VirtualSink.output` stream has two active links to the 848. In this
+mode the adapter exposes no node-level `softVolumes`, so the stale 0% value in
+the 32-channel Pulse view is bypassed instead of written back to the hardware:
 
 ```sh
-tools/recover-motu-audio.sh --disable-wireplumber-route-restore --native-volume
+tools/recover-motu-audio.sh --disable-wireplumber-route-restore --native-dsp
 ```
+
+`--native-volume` remains available as a compatibility alias for
+`--native-dsp`.
 
 Read a known or suspected path:
 
