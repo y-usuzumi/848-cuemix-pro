@@ -398,6 +398,11 @@ recover() {
   fi
   loopback_id="$(single_loopback_sink_input_id)"
 
+  # Link the established playback path before changing volume. The 848 node
+  # otherwise stays suspended and discards dynamic software-volume parameters.
+  echo "Routing VirtualSink.output to the MOTU..."
+  route_loopback_to_motu "$loopback_id"
+
   echo "Restoring the 848 USB and PipeWire playback volume..."
   amixer -c "$card" sset 'Audio Out' 100% unmute >/dev/null
   pactl set-sink-mute "$MOTU_SINK" 0
@@ -409,9 +414,6 @@ recover() {
     pactl set-sink-volume "$MOTU_SINK" 100%
     wait_for_full_scale_sink
   fi
-
-  echo "Routing VirtualSink.output to the MOTU..."
-  route_loopback_to_motu "$loopback_id"
 
   verify_recovery "$card" "$loopback_id"
   echo "Recovered and verified."
