@@ -273,6 +273,42 @@ The UI includes live Mic 1-4 controls for preamp name, gain, 48 V, pad, and
 polarity, plus analog output gain controls for outputs 1-12. It also keeps raw
 read, write, and probe controls for the remaining datastore surface.
 
+## Linux Audio Recovery
+
+The 848 USB playback path is intended to remain at full scale, with monitor
+level controlled by the 848's physical knob. If a Linux volume control leaves
+the `848 Multichannel` PipeWire sink at zero while the 848 USB `Audio Out`
+mixer remains at full scale, first inspect the two layers without changing
+audio:
+
+```sh
+tools/recover-motu-audio.sh --check
+```
+
+The normal mode resets the 848's combined input/output multichannel profile,
+restores the USB and PipeWire sink volumes to 100%, and routes the existing
+`VirtualSink.output` loopback to the 848 at full scale. It does not alter the
+default sink or application stream routing. This is a live audio operation, so
+stop playback, recording, and live capture first:
+
+```sh
+tools/recover-motu-audio.sh
+```
+
+The script is tailored to this workstation's USB card name
+`alsa_card.usb-MOTU_848_848AFEB9E2-00` and an already-created `VirtualSink`
+with a `VirtualSink.output` loopback stream. Update the variables at the top of
+the script if a different 848 or PipeWire graph uses different names.
+
+PipeWire Pulse's `module-device-restore` can reapply a saved device volume. To
+test that cause for the current PipeWire Pulse session, add the explicit switch
+below. It disables device-volume restoration for every Pulse device until
+`pipewire-pulse` restarts:
+
+```sh
+tools/recover-motu-audio.sh --disable-pulse-device-restore
+```
+
 Read a known or suspected path:
 
 ```sh

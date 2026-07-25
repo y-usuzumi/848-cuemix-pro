@@ -21,6 +21,8 @@ and is served by the same binary.
 - `src/probe.rs`: conservative read-only endpoint probing.
 - `src/server.rs`: local browser proxy and API routes.
 - `src/ui.rs` and `src/ui.html`: browser UI template and renderer.
+- `tools/recover-motu-audio.sh`: opt-in PipeWire recovery for the 848's
+  full-scale USB playback path.
 
 ## Hardware guardrails
 
@@ -33,6 +35,11 @@ and is served by the same binary.
   A/B/C monitor-group mapping. Keep that work behind AVDECC descriptor mapping.
 - Polling is the UI recovery mechanism until AVDECC unsolicited notifications
   are implemented. Do not remove it merely because a write endpoint responds.
+- `tools/recover-motu-audio.sh --check` is read-only. Its normal recovery mode
+  changes the 848 USB Audio Out mixer, PipeWire sink, and `VirtualSink` loopback
+  route; do not run it as automated verification. The optional
+  `--disable-pulse-device-restore` switch affects every Pulse device until
+  `pipewire-pulse` restarts.
 - A v0 AVDECC Proxy identity reply with a nonzero reserved field is not a
   standard controller identity. Treat its payload only as a vendor-extension
   candidate. It may be used for a source-backed, single read-only
