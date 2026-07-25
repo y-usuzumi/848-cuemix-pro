@@ -2,19 +2,18 @@
 set -euo pipefail
 
 MOTU_CARD="alsa_card.usb-MOTU_848_848AFEB9E2-00"
-MOTU_PROFILE="output:multichannel-output+input:multichannel-input"
 MOTU_SINK="alsa_output.usb-MOTU_848_848AFEB9E2-00.multichannel-output"
 VIRTUAL_SINK="VirtualSink"
 LOOPBACK_NODE="VirtualSink.output"
 
 CHECK_ONLY=false
-DISABLE_PULSE_DEVICE_RESTORE=false
 DISABLE_WIREPLUMBER_ROUTE_RESTORE=false
+USE_NATIVE_VOLUME=false
 
 usage() {
   cat <<'EOF'
-Usage: recover-motu-audio.sh [--check] [--disable-pulse-device-restore]
-                             [--disable-wireplumber-route-restore]
+Usage: recover-motu-audio.sh [--check] [--disable-wireplumber-route-restore]
+                             [--native-volume]
 
 Restores the intended VirtualSink loopback and verifies that the 848 PipeWire
 sink remains at 100%. It does not reset the 848 card profile by default.
@@ -22,14 +21,13 @@ sink remains at 100%. It does not reset the 848 card profile by default.
 Options:
   --check                         Report the 848 profile, USB mixer, and
                                   PipeWire sink state without changing audio.
-  --disable-pulse-device-restore  Reload PipeWire Pulse's device-restore
-                                  module with volume restoration disabled for
-                                  this PipeWire Pulse session. This affects all
-                                  Pulse devices until pipewire-pulse restarts.
   --disable-wireplumber-route-restore
                                   Disable WirePlumber device-route restoration
                                   for this WirePlumber session. This affects all
                                   devices until WirePlumber restarts.
+  --native-volume                 Set every native PipeWire channel directly,
+                                  bypassing the 32-channel Pulse view. This is
+                                  intended for the 848's 128-channel sink.
   -h, --help                      Show this help.
 EOF
 }
@@ -63,16 +61,8 @@ alsa_card_index() {
   }'
 }
 
-profile_is_available() {
-  card_details | awk -v profile="$MOTU_PROFILE" '$1 == profile ":" { found = 1 } END { exit !found }'
-}
-
 active_profile() {
   card_details | awk '/^[[:space:]]*Active Profile: / { print $3; exit }'
-}
-
-profile_is_active() {
-  [ "$(active_profile)" = "$MOTU_PROFILE" ]
 }
 
 sink_exists() {
@@ -99,6 +89,79 @@ sink_volume_summary() {
   local sink="$1"
 
   pactl get-sink-volume "$sink" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g'
+}
+
+native_node_json() {
+  pw-dump | jq -ce --arg node "$MOTU_SINK" '
+    [ .[]
+      | select(.type == "PipeWire:Interface:Node" and .info.props["node.name"] == $node)
+      | {
+          id,
+          channels: .info.props["audio.channels"],
+          soft_volumes: (.info.params.Props[0].softVolumes // [])
+        }
+    ]
+    | if length == 1 then .[0] else error("expected one matching PipeWire node") end
+  '
+}
+
+native_node_matches() {
+  local expected_id="$1"
+  local expected_channels="$2"
+  local node_json
+
+  node_json="$(native_node_json)" || return 1
+  [ "$(jq -r '.id' <<< "$node_json")" = "$expected_id" ] \
+    && [ "$(jq -r '.channels' <<< "$node_json")" = "$expected_channels" ]
+}
+
+set_native_full_scale_soft_volume() {
+  local node_json node_id channel_count channel_volumes
+
+  node_json="$(native_node_json)" || {
+    echo "Could not find the native 848 PipeWire node" >&2
+    return 1
+  }
+  node_id="$(jq -r '.id' <<< "$node_json")"
+  channel_count="$(jq -r '.channels' <<< "$node_json")"
+  if ! [[ "$channel_count" =~ ^[1-9][0-9]*$ ]] || [ "$channel_count" -ne 128 ]; then
+    echo "Expected a 128-channel native 848 PipeWire node, got: $channel_count" >&2
+    return 1
+  fi
+  if ! native_node_matches "$node_id" "$channel_count"; then
+    echo "848 PipeWire node changed before the native volume write" >&2
+    return 1
+  fi
+
+  channel_volumes="$(printf '1.0 %.0s' $(seq 1 "$channel_count"))"
+  pw-cli set-param "$node_id" Props "{ softMute = false, softVolumes = [ $channel_volumes ] }"
+}
+
+native_soft_volumes_are_full_scale() {
+  local node_json channel_count
+
+  node_json="$(native_node_json)" || return 1
+  channel_count="$(jq -r '.channels' <<< "$node_json")"
+  [[ "$channel_count" =~ ^[1-9][0-9]*$ ]] || return 1
+  jq -e --argjson channel_count "$channel_count" '
+    (.soft_volumes | type == "array")
+    and (length == $channel_count)
+    and all(.[]; . == 1)
+  ' <<< "$node_json" >/dev/null
+}
+
+wait_for_native_full_scale_volume() {
+  local attempts="${1:-20}"
+
+  for _ in $(seq 1 "$attempts"); do
+    if native_soft_volumes_are_full_scale; then
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  echo "848 native soft volumes did not remain full scale" >&2
+  return 1
 }
 
 sink_is_unmuted() {
@@ -235,77 +298,6 @@ route_loopback_to_motu() {
   fi
 }
 
-module_arguments() {
-  local module_id="$1"
-
-  pactl list modules | awk -v module_id="$module_id" '
-    /^Module #[0-9]+/ {
-      if (in_module) exit
-      in_module = $2 == "#" module_id
-      next
-    }
-    in_module && /^[[:space:]]*Argument:/ {
-      sub(/^[[:space:]]*Argument:[[:space:]]*/, "")
-      print
-      exit
-    }
-  '
-}
-
-disable_pulse_device_volume_restore() {
-  local module_id current_arguments
-  local -a current_argument_tokens=()
-  local -a replacement_arguments=()
-  local argument found_volume_setting=false
-
-  module_id="$(pactl list modules short | awk '$2 == "module-device-restore" { print $1; exit }')"
-  if [ -z "$module_id" ]; then
-    pactl load-module module-device-restore restore_volume=false >/dev/null
-    return
-  fi
-
-  current_arguments="$(module_arguments "$module_id")"
-  if [ -n "$current_arguments" ]; then
-    # pactl prints module arguments as plain key=value tokens. Preserve every
-    # existing option except the one this diagnostic switch intentionally alters.
-    read -r -a current_argument_tokens <<< "$current_arguments"
-  fi
-  for argument in "${current_argument_tokens[@]}"; do
-    case "$argument" in
-      restore_volume=*)
-        argument="restore_volume=false"
-        found_volume_setting=true
-        ;;
-    esac
-    replacement_arguments+=("$argument")
-  done
-  if [ "$found_volume_setting" = false ]; then
-    replacement_arguments+=("restore_volume=false")
-  fi
-
-  # PipeWire Pulse permits only one module-device-restore instance. Preserve
-  # its arguments so a rejected replacement can be immediately restored.
-  if ! pactl unload-module "$module_id"; then
-    echo "Could not unload the existing PipeWire Pulse device-restore module" >&2
-    return 1
-  fi
-  if pactl load-module module-device-restore "${replacement_arguments[@]}" >/dev/null; then
-    return 0
-  fi
-
-  echo "Could not load PipeWire Pulse device restore with volume restoration disabled" >&2
-  if [ "${#current_argument_tokens[@]}" -gt 0 ]; then
-    if ! pactl load-module module-device-restore "${current_argument_tokens[@]}" >/dev/null; then
-      echo "Could not restore the original PipeWire Pulse device-restore module" >&2
-    fi
-  else
-    if ! pactl load-module module-device-restore >/dev/null; then
-      echo "Could not restore the original PipeWire Pulse device-restore module" >&2
-    fi
-  fi
-  return 1
-}
-
 disable_wireplumber_route_restore() {
   wpctl settings device.restore-routes false
 }
@@ -317,10 +309,6 @@ preflight() {
   card="$(alsa_card_index)"
   if [ -z "$card" ]; then
     echo "MOTU card not found: $MOTU_CARD" >&2
-    return 1
-  fi
-  if ! profile_is_available; then
-    echo "MOTU profile is unavailable: $MOTU_PROFILE" >&2
     return 1
   fi
   if [ "$require_virtual_sink" = true ] && ! sink_exists "$VIRTUAL_SINK"; then
@@ -342,10 +330,6 @@ check() {
   echo "MOTU ALSA card: $card"
   echo "MOTU active profile: $(active_profile)"
   echo "MOTU PipeWire sink: $MOTU_SINK"
-  if ! profile_is_active; then
-    echo "MOTU profile: expected $MOTU_PROFILE" >&2
-    status=1
-  fi
   if usb_audio_out_is_full_scale "$card"; then
     echo "MOTU USB Audio Out: 100% and unmuted"
   else
@@ -371,15 +355,16 @@ verify_recovery() {
   local input_id="$2"
   local status=0
 
-  if ! profile_is_active; then
-    echo "848 profile did not remain active: $(active_profile)" >&2
-    status=1
-  fi
   if ! usb_audio_out_is_full_scale "$card"; then
     echo "848 USB Audio Out did not remain full scale and unmuted" >&2
     status=1
   fi
-  if ! sink_is_full_scale "$MOTU_SINK" || ! sink_is_unmuted "$MOTU_SINK"; then
+  if [ "$USE_NATIVE_VOLUME" = true ]; then
+    if ! native_soft_volumes_are_full_scale; then
+      echo "848 native soft volumes did not remain full scale" >&2
+      status=1
+    fi
+  elif ! sink_is_full_scale "$MOTU_SINK" || ! sink_is_unmuted "$MOTU_SINK"; then
     echo "848 PipeWire sink did not remain full scale and unmuted" >&2
     status=1
   fi
@@ -413,16 +398,17 @@ recover() {
   fi
   loopback_id="$(single_loopback_sink_input_id)"
 
-  if [ "$DISABLE_PULSE_DEVICE_RESTORE" = true ]; then
-    echo "Disabling PipeWire Pulse device-volume restoration for this session..."
-    disable_pulse_device_volume_restore
-  fi
-
   echo "Restoring the 848 USB and PipeWire playback volume..."
   amixer -c "$card" sset 'Audio Out' 100% unmute >/dev/null
   pactl set-sink-mute "$MOTU_SINK" 0
-  pactl set-sink-volume "$MOTU_SINK" 100%
-  wait_for_full_scale_sink
+  if [ "$USE_NATIVE_VOLUME" = true ]; then
+    echo "Setting all native PipeWire soft playback channels..."
+    set_native_full_scale_soft_volume
+    wait_for_native_full_scale_volume
+  else
+    pactl set-sink-volume "$MOTU_SINK" 100%
+    wait_for_full_scale_sink
+  fi
 
   echo "Routing VirtualSink.output to the MOTU..."
   route_loopback_to_motu "$loopback_id"
@@ -437,11 +423,11 @@ parse_args() {
       --check)
         CHECK_ONLY=true
         ;;
-      --disable-pulse-device-restore)
-        DISABLE_PULSE_DEVICE_RESTORE=true
-        ;;
       --disable-wireplumber-route-restore)
         DISABLE_WIREPLUMBER_ROUTE_RESTORE=true
+        ;;
+      --native-volume)
+        USE_NATIVE_VOLUME=true
         ;;
       -h|--help)
         usage
@@ -459,7 +445,7 @@ parse_args() {
 
 main() {
   parse_args "$@"
-  if [ "$CHECK_ONLY" = true ] && { [ "$DISABLE_PULSE_DEVICE_RESTORE" = true ] || [ "$DISABLE_WIREPLUMBER_ROUTE_RESTORE" = true ]; }; then
+  if [ "$CHECK_ONLY" = true ] && { [ "$DISABLE_WIREPLUMBER_ROUTE_RESTORE" = true ] || [ "$USE_NATIVE_VOLUME" = true ]; }; then
     echo "Recovery options require normal recovery mode, not --check" >&2
     exit 2
   fi
@@ -467,6 +453,11 @@ main() {
   require_cmd pactl
   if [ "$DISABLE_WIREPLUMBER_ROUTE_RESTORE" = true ]; then
     require_cmd wpctl
+  fi
+  if [ "$USE_NATIVE_VOLUME" = true ]; then
+    require_cmd jq
+    require_cmd pw-cli
+    require_cmd pw-dump
   fi
 
   if [ "$CHECK_ONLY" = true ]; then

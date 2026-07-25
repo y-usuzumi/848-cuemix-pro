@@ -40,8 +40,6 @@ and is served by the same binary.
 - `tools/recover-motu-audio.sh --check` is read-only. Its normal recovery mode
   changes the 848 USB Audio Out mixer, PipeWire sink, and `VirtualSink` loopback
   route; do not run it as automated verification. The optional
-  `--disable-pulse-device-restore` switch affects every Pulse device until
-  `pipewire-pulse` restarts. The optional
   `--disable-wireplumber-route-restore` switch affects every WirePlumber device
   route until WirePlumber restarts.
 - `tools/enable-motu-soft-mixer.sh --install` writes a per-device WirePlumber

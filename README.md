@@ -299,15 +299,6 @@ The script is tailored to this workstation's USB card name
 with a `VirtualSink.output` loopback stream. Update the variables at the top of
 the script if a different 848 or PipeWire graph uses different names.
 
-PipeWire Pulse's `module-device-restore` can reapply a saved device volume. To
-test that cause for the current PipeWire Pulse session, add the explicit switch
-below. It disables device-volume restoration for every Pulse device until
-`pipewire-pulse` restarts:
-
-```sh
-tools/recover-motu-audio.sh --disable-pulse-device-restore
-```
-
 On this system, WirePlumber currently has `device.restore-routes=true`; that
 policy can restore the 848 route to zero whenever the device node is recreated.
 To disable route restoration for the current WirePlumber session while running
@@ -338,10 +329,19 @@ tools/enable-motu-soft-mixer.sh --install
 
 To remove the rule later, run `tools/enable-motu-soft-mixer.sh --remove`.
 
-Afterward, rerun recovery with the two session-scoped restoration workarounds:
+Afterward, rerun recovery with the session-scoped route-restoration workaround:
 
 ```sh
-tools/recover-motu-audio.sh --disable-wireplumber-route-restore --disable-pulse-device-restore
+tools/recover-motu-audio.sh --disable-wireplumber-route-restore
+```
+
+The 848's PipeWire node advertises 128 native playback channels while its
+Pulse-compatible sink exposes only 32. If a regular recovery still snaps back
+to zero, use the experimental native path to apply software volume to all 128
+advertised channels without using the hardware-volume control:
+
+```sh
+tools/recover-motu-audio.sh --disable-wireplumber-route-restore --native-volume
 ```
 
 Read a known or suspected path:
