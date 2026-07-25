@@ -253,7 +253,7 @@ module_arguments() {
 }
 
 disable_pulse_device_volume_restore() {
-  local module_id current_arguments new_module_id
+  local module_id current_arguments
   local -a current_argument_tokens=()
   local -a replacement_arguments=()
   local argument found_volume_setting=false
@@ -283,17 +283,27 @@ disable_pulse_device_volume_restore() {
     replacement_arguments+=("restore_volume=false")
   fi
 
-  # Load before unloading the original module. A rejected replacement therefore
-  # leaves the user's current Pulse restoration behavior intact.
-  if ! new_module_id="$(pactl load-module module-device-restore "${replacement_arguments[@]}")"; then
-    echo "Could not load PipeWire Pulse device restore with volume restoration disabled" >&2
-    return 1
-  fi
+  # PipeWire Pulse permits only one module-device-restore instance. Preserve
+  # its arguments so a rejected replacement can be immediately restored.
   if ! pactl unload-module "$module_id"; then
-    echo "Could not replace the existing PipeWire Pulse device-restore module" >&2
-    pactl unload-module "$new_module_id" || true
+    echo "Could not unload the existing PipeWire Pulse device-restore module" >&2
     return 1
   fi
+  if pactl load-module module-device-restore "${replacement_arguments[@]}" >/dev/null; then
+    return 0
+  fi
+
+  echo "Could not load PipeWire Pulse device restore with volume restoration disabled" >&2
+  if [ "${#current_argument_tokens[@]}" -gt 0 ]; then
+    if ! pactl load-module module-device-restore "${current_argument_tokens[@]}" >/dev/null; then
+      echo "Could not restore the original PipeWire Pulse device-restore module" >&2
+    fi
+  else
+    if ! pactl load-module module-device-restore >/dev/null; then
+      echo "Could not restore the original PipeWire Pulse device-restore module" >&2
+    fi
+  fi
+  return 1
 }
 
 disable_wireplumber_route_restore() {
