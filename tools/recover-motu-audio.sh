@@ -167,6 +167,22 @@ sink_input_is_routed_to() {
   '
 }
 
+sink_input_targets_sink() {
+  local input_id="$1"
+  local sink="$2"
+  local destination_id
+
+  if sink_input_is_routed_to "$input_id" "$sink"; then
+    return 0
+  fi
+  destination_id="$(sink_input_destination_id "$input_id")" || return 1
+  [ "$destination_id" = "$PULSE_UNLINKED_SINK_ID" ] || return 1
+  sink_input_ids_with_property "target.object" "$sink" | awk -v input_id="$input_id" '
+    $1 == input_id { found = 1 }
+    END { exit !found }
+  '
+}
+
 sink_input_destination_id() {
   local input_id="$1"
 
@@ -359,8 +375,8 @@ verify_recovery() {
     echo "848 PipeWire sink did not remain unmuted" >&2
     status=1
   fi
-  if ! sink_input_is_routed_to "$input_id" "$MOTU_SINK"; then
-    echo "VirtualSink loopback is not routed to the 848" >&2
+  if ! sink_input_targets_sink "$input_id" "$MOTU_SINK"; then
+    echo "VirtualSink loopback is not configured to target the 848" >&2
     status=1
   fi
   if ! sink_input_is_full_scale "$input_id" || ! sink_input_is_unmuted "$input_id"; then
@@ -389,8 +405,8 @@ recover() {
   fi
   loopback_id="$(single_loopback_sink_input_id)"
 
-  # Link the established playback path before changing volume. The 848 node
-  # otherwise stays suspended and discards dynamic software-volume parameters.
+  # Refresh the passive loopback target before changing volume. It remains
+  # unlinked while idle and reconnects when VirtualSink receives real audio.
   echo "Routing VirtualSink.output to the MOTU..."
   route_loopback_to_motu "$loopback_id"
 
@@ -398,12 +414,12 @@ recover() {
   amixer -c "$card" sset 'Audio Out' 100% unmute >/dev/null
   pactl set-sink-mute "$MOTU_SINK" 0
   if [ "$USE_NATIVE_VOLUME" = true ]; then
-    trap 'stop_silent_virtual_sink_activator' EXIT
-    trap 'stop_silent_virtual_sink_activator; exit 130' INT
-    trap 'stop_silent_virtual_sink_activator; exit 143' TERM
+    trap 'stop_silent_motu_activator' EXIT
+    trap 'stop_silent_motu_activator; exit 130' INT
+    trap 'stop_silent_motu_activator; exit 143' TERM
     echo "Waking the 848 playback path with silence..."
-    start_silent_virtual_sink_activator
-    if ! wait_for_active_native_path "$loopback_id"; then
+    start_silent_motu_activator
+    if ! wait_for_active_native_path; then
       return 1
     fi
     echo "Setting all native PipeWire soft playback channels..."
@@ -413,9 +429,9 @@ recover() {
     if ! verify_recovery "$card" "$loopback_id"; then
       return 1
     fi
-    # Let the silent stream exit, wait for the node to settle, then confirm
-    # the native setting survived the transition back to an idle graph.
-    if ! wait_for_silent_virtual_sink_activator \
+    # Let the silent stream exit, wait for a stable usable node state, then
+    # confirm the native setting survived without relying on the activator.
+    if ! wait_for_silent_motu_activator \
       || ! wait_for_native_node_to_settle \
       || ! native_soft_volumes_are_full_scale; then
       echo "848 native soft volumes did not survive the silent activation stream" >&2

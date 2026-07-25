@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Native PipeWire volume support for recover-motu-audio.sh. This file is not
-# intended to be invoked directly; its caller supplies MOTU_SINK and VIRTUAL_SINK.
+# intended to be invoked directly; its caller supplies MOTU_SINK.
 
 NATIVE_ACTIVATOR_SAMPLE_COUNT="480000"
 NATIVE_ACTIVATOR_TIMEOUT_SECONDS="12"
@@ -110,18 +110,18 @@ wait_for_native_full_scale_volume() {
   return 1
 }
 
-start_silent_virtual_sink_activator() {
+start_silent_motu_activator() {
   # A suspended ALSA node accepts Props syntax but discards dynamic softVolumes.
-  # Feed the existing VirtualSink zero-valued PCM briefly so its passive
-  # loopback has a live route to the 848 without producing audible audio.
+  # Feed the MOTU sink zero-valued PCM directly. Waking VirtualSink is not
+  # sufficient because its output stream is deliberately passive while idle.
   timeout --signal=TERM --kill-after=1s "$NATIVE_ACTIVATOR_TIMEOUT_SECONDS"s \
     pw-cat --playback --raw --format s16 --rate 48000 --channels 2 \
-      --target "$VIRTUAL_SINK" --volume 0 \
+      --target "$MOTU_SINK" --volume 1 \
       --sample-count "$NATIVE_ACTIVATOR_SAMPLE_COUNT" /dev/zero >/dev/null 2>&1 &
   SILENT_ACTIVATOR_PID="$!"
 }
 
-stop_silent_virtual_sink_activator() {
+stop_silent_motu_activator() {
   if [ -n "$SILENT_ACTIVATOR_PID" ]; then
     kill "$SILENT_ACTIVATOR_PID" 2>/dev/null || true
     wait "$SILENT_ACTIVATOR_PID" 2>/dev/null || true
@@ -130,31 +130,30 @@ stop_silent_virtual_sink_activator() {
 }
 
 wait_for_active_native_path() {
-  local input_id="$1"
-  local attempts="${2:-20}"
+  local attempts="${1:-20}"
 
   for _ in $(seq 1 "$attempts"); do
     if ! kill -0 "$SILENT_ACTIVATOR_PID" 2>/dev/null; then
       wait "$SILENT_ACTIVATOR_PID" || true
       SILENT_ACTIVATOR_PID=""
-      echo "The silent VirtualSink activation stream exited before the 848 became active" >&2
+      echo "The silent MOTU activation stream exited before the 848 became active" >&2
       return 1
     fi
-    if sink_input_is_routed_to "$input_id" "$MOTU_SINK" && native_node_is_active; then
+    if native_node_is_active; then
       return 0
     fi
     sleep 0.2
   done
 
-  echo "The silent VirtualSink stream did not activate the 848 playback path" >&2
+  echo "The silent stream did not activate the 848 playback path" >&2
   return 1
 }
 
-wait_for_silent_virtual_sink_activator() {
+wait_for_silent_motu_activator() {
   [ -n "$SILENT_ACTIVATOR_PID" ] || return 1
   if ! wait "$SILENT_ACTIVATOR_PID"; then
     SILENT_ACTIVATOR_PID=""
-    echo "The silent VirtualSink activation stream exited unexpectedly" >&2
+    echo "The silent MOTU activation stream exited unexpectedly" >&2
     return 1
   fi
   SILENT_ACTIVATOR_PID=""
