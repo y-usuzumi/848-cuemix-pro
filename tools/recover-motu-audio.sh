@@ -11,6 +11,10 @@ CHECK_ONLY=false
 DISABLE_WIREPLUMBER_ROUTE_RESTORE=false
 USE_NATIVE_VOLUME=false
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# The native path is isolated because it owns transient PipeWire activation.
+source "$SCRIPT_DIR/motu-native-volume.sh"
+
 usage() {
   cat <<'EOF'
 Usage: recover-motu-audio.sh [--check] [--disable-wireplumber-route-restore]
@@ -90,79 +94,6 @@ sink_volume_summary() {
   local sink="$1"
 
   pactl get-sink-volume "$sink" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g'
-}
-
-native_node_json() {
-  pw-dump | jq -ce --arg node "$MOTU_SINK" '
-    [ .[]
-      | select(.type == "PipeWire:Interface:Node" and .info.props["node.name"] == $node)
-      | {
-          id,
-          channels: .info.props["audio.channels"],
-          soft_volumes: (.info.params.Props[0].softVolumes // [])
-        }
-    ]
-    | if length == 1 then .[0] else error("expected one matching PipeWire node") end
-  '
-}
-
-native_node_matches() {
-  local expected_id="$1"
-  local expected_channels="$2"
-  local node_json
-
-  node_json="$(native_node_json)" || return 1
-  [ "$(jq -r '.id' <<< "$node_json")" = "$expected_id" ] \
-    && [ "$(jq -r '.channels' <<< "$node_json")" = "$expected_channels" ]
-}
-
-set_native_full_scale_soft_volume() {
-  local node_json node_id channel_count channel_volumes
-
-  node_json="$(native_node_json)" || {
-    echo "Could not find the native 848 PipeWire node" >&2
-    return 1
-  }
-  node_id="$(jq -r '.id' <<< "$node_json")"
-  channel_count="$(jq -r '.channels' <<< "$node_json")"
-  if ! [[ "$channel_count" =~ ^[1-9][0-9]*$ ]] || [ "$channel_count" -ne 128 ]; then
-    echo "Expected a 128-channel native 848 PipeWire node, got: $channel_count" >&2
-    return 1
-  fi
-  if ! native_node_matches "$node_id" "$channel_count"; then
-    echo "848 PipeWire node changed before the native volume write" >&2
-    return 1
-  fi
-
-  channel_volumes="$(printf '1.0 %.0s' $(seq 1 "$channel_count"))"
-  pw-cli set-param "$node_id" Props "{ softMute = false, softVolumes = [ $channel_volumes ] }"
-}
-
-native_soft_volumes_are_full_scale() {
-  local node_json channel_count
-
-  node_json="$(native_node_json)" || return 1
-  channel_count="$(jq -r '.channels' <<< "$node_json")"
-  [[ "$channel_count" =~ ^[1-9][0-9]*$ ]] || return 1
-  jq -e --argjson channel_count "$channel_count" '
-    (.soft_volumes | type == "array")
-    and (length == $channel_count)
-    and all(.[]; . == 1)
-  ' <<< "$node_json" >/dev/null
-}
-
-wait_for_native_full_scale_volume() {
-  local attempts="${1:-20}"
-
-  for _ in $(seq 1 "$attempts"); do
-    if native_soft_volumes_are_full_scale; then
-      return 0
-    fi
-    sleep 0.2
-  done
-
-  echo "848 native soft volumes did not remain full scale" >&2
-  return 1
 }
 
 sink_is_unmuted() {
@@ -420,8 +351,12 @@ verify_recovery() {
       echo "848 native soft volumes did not remain full scale" >&2
       status=1
     fi
-  elif ! sink_is_full_scale "$MOTU_SINK" || ! sink_is_unmuted "$MOTU_SINK"; then
-    echo "848 PipeWire sink did not remain full scale and unmuted" >&2
+  elif ! sink_is_full_scale "$MOTU_SINK"; then
+    echo "848 PipeWire sink did not remain full scale" >&2
+    status=1
+  fi
+  if ! sink_is_unmuted "$MOTU_SINK"; then
+    echo "848 PipeWire sink did not remain unmuted" >&2
     status=1
   fi
   if ! sink_input_is_routed_to "$input_id" "$MOTU_SINK"; then
@@ -463,15 +398,36 @@ recover() {
   amixer -c "$card" sset 'Audio Out' 100% unmute >/dev/null
   pactl set-sink-mute "$MOTU_SINK" 0
   if [ "$USE_NATIVE_VOLUME" = true ]; then
+    trap 'stop_silent_virtual_sink_activator' EXIT
+    trap 'stop_silent_virtual_sink_activator; exit 130' INT
+    trap 'stop_silent_virtual_sink_activator; exit 143' TERM
+    echo "Waking the 848 playback path with silence..."
+    start_silent_virtual_sink_activator
+    if ! wait_for_active_native_path "$loopback_id"; then
+      return 1
+    fi
     echo "Setting all native PipeWire soft playback channels..."
-    set_native_full_scale_soft_volume
-    wait_for_native_full_scale_volume
+    if ! set_native_full_scale_soft_volume || ! wait_for_native_full_scale_volume; then
+      return 1
+    fi
+    if ! verify_recovery "$card" "$loopback_id"; then
+      return 1
+    fi
+    # Let the silent stream exit, wait for the node to settle, then confirm
+    # the native setting survived the transition back to an idle graph.
+    if ! wait_for_silent_virtual_sink_activator \
+      || ! wait_for_native_node_to_settle \
+      || ! native_soft_volumes_are_full_scale; then
+      echo "848 native soft volumes did not survive the silent activation stream" >&2
+      return 1
+    fi
+    trap - EXIT INT TERM
   else
     pactl set-sink-volume "$MOTU_SINK" 100%
     wait_for_full_scale_sink
+    verify_recovery "$card" "$loopback_id"
   fi
 
-  verify_recovery "$card" "$loopback_id"
   echo "Recovered and verified."
 }
 
@@ -514,8 +470,10 @@ main() {
   fi
   if [ "$USE_NATIVE_VOLUME" = true ]; then
     require_cmd jq
+    require_cmd pw-cat
     require_cmd pw-cli
     require_cmd pw-dump
+    require_cmd timeout
   fi
 
   if [ "$CHECK_ONLY" = true ]; then

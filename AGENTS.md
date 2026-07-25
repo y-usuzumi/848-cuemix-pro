@@ -22,7 +22,9 @@ and is served by the same binary.
 - `src/server.rs`: local browser proxy and API routes.
 - `src/ui.rs` and `src/ui.html`: browser UI template and renderer.
 - `tools/recover-motu-audio.sh`: opt-in PipeWire recovery for the 848's
-  full-scale USB playback path.
+  full-scale USB playback path; its native activation and `softVolumes`
+  helpers live in `tools/motu-native-volume.sh` and are sourced, not run
+  directly.
 - `tools/enable-motu-soft-mixer.sh`: opt-in per-device WirePlumber rule for
   the 848's mismatched UAC hardware-volume control.
 
