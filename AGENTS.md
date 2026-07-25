@@ -39,7 +39,9 @@ and is served by the same binary.
   changes the 848 USB Audio Out mixer, PipeWire sink, and `VirtualSink` loopback
   route; do not run it as automated verification. The optional
   `--disable-pulse-device-restore` switch affects every Pulse device until
-  `pipewire-pulse` restarts.
+  `pipewire-pulse` restarts. The optional
+  `--disable-wireplumber-route-restore` switch affects every WirePlumber device
+  route until WirePlumber restarts.
 - A v0 AVDECC Proxy identity reply with a nonzero reserved field is not a
   standard controller identity. Treat its payload only as a vendor-extension
   candidate. It may be used for a source-backed, single read-only

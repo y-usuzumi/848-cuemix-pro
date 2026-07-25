@@ -9,14 +9,15 @@ LOOPBACK_NODE="VirtualSink.output"
 
 CHECK_ONLY=false
 DISABLE_PULSE_DEVICE_RESTORE=false
-MOTU_PREVIOUS_PROFILE=""
+DISABLE_WIREPLUMBER_ROUTE_RESTORE=false
 
 usage() {
   cat <<'EOF'
 Usage: recover-motu-audio.sh [--check] [--disable-pulse-device-restore]
+                             [--disable-wireplumber-route-restore]
 
-Recreates the 848 multichannel PipeWire profile, restores the intended
-VirtualSink routing, and verifies that the 848 PipeWire sink remains at 100%.
+Restores the intended VirtualSink loopback and verifies that the 848 PipeWire
+sink remains at 100%. It does not reset the 848 card profile by default.
 
 Options:
   --check                         Report the 848 profile, USB mixer, and
@@ -25,6 +26,10 @@ Options:
                                   module with volume restoration disabled for
                                   this PipeWire Pulse session. This affects all
                                   Pulse devices until pipewire-pulse restarts.
+  --disable-wireplumber-route-restore
+                                  Disable WirePlumber device-route restoration
+                                  for this WirePlumber session. This affects all
+                                  devices until WirePlumber restarts.
   -h, --help                      Show this help.
 EOF
 }
@@ -74,21 +79,6 @@ sink_exists() {
   pactl list sinks short | awk '{ print $2 }' | grep -Fxq "$1"
 }
 
-wait_for_sink() {
-  local sink="$1"
-  local attempts="${2:-30}"
-
-  for _ in $(seq 1 "$attempts"); do
-    if sink_exists "$sink"; then
-      return 0
-    fi
-    sleep 0.2
-  done
-
-  echo "Timed out waiting for sink: $sink" >&2
-  return 1
-}
-
 sink_is_full_scale() {
   local sink="$1"
 
@@ -125,6 +115,7 @@ wait_for_full_scale_sink() {
   for _ in $(seq 1 "$attempts"); do
     if ! sink_is_full_scale "$MOTU_SINK"; then
       echo "848 PipeWire sink returned below 100%: $(sink_volume_summary "$MOTU_SINK")" >&2
+      echo "Try --disable-wireplumber-route-restore if WirePlumber is restoring this route." >&2
       return 1
     fi
     sleep 0.2
@@ -305,32 +296,8 @@ disable_pulse_device_volume_restore() {
   fi
 }
 
-recreate_motu_profile() {
-  MOTU_PREVIOUS_PROFILE="$(active_profile)"
-  if ! pactl set-card-profile "$MOTU_CARD" off; then
-    echo "Could not deactivate $MOTU_CARD" >&2
-    return 1
-  fi
-  sleep 0.5
-  if pactl set-card-profile "$MOTU_CARD" "$MOTU_PROFILE"; then
-    return 0
-  fi
-
-  # Preflight proves the profile was advertised, but the audio daemon can still
-  # fail while reopening USB. Restore the prior profile rather than strand the
-  # 848 at off when that happens.
-  echo "Could not activate $MOTU_PROFILE; restoring $MOTU_PREVIOUS_PROFILE" >&2
-  restore_previous_motu_profile
-  return 1
-}
-
-restore_previous_motu_profile() {
-  if [ -n "$MOTU_PREVIOUS_PROFILE" ] && [ "$MOTU_PREVIOUS_PROFILE" != "off" ]; then
-    if ! pactl set-card-profile "$MOTU_CARD" "$MOTU_PREVIOUS_PROFILE"; then
-      echo "Could not restore $MOTU_PREVIOUS_PROFILE; the 848 may remain at off" >&2
-      return 1
-    fi
-  fi
+disable_wireplumber_route_restore() {
+  wpctl settings device.restore-routes false
 }
 
 preflight() {
@@ -424,21 +391,22 @@ recover() {
 
   preflight true
   card="$(alsa_card_index)"
+
+  if [ "$DISABLE_WIREPLUMBER_ROUTE_RESTORE" = true ]; then
+    echo "Disabling WirePlumber device-route restoration for this session..."
+    disable_wireplumber_route_restore
+  fi
+
+  if ! sink_exists "$MOTU_SINK"; then
+    echo "848 PipeWire sink is unavailable; reconnect the device or select its profile through the system audio settings" >&2
+    return 1
+  fi
   loopback_id="$(single_loopback_sink_input_id)"
 
   if [ "$DISABLE_PULSE_DEVICE_RESTORE" = true ]; then
     echo "Disabling PipeWire Pulse device-volume restoration for this session..."
     disable_pulse_device_volume_restore
   fi
-
-  echo "Recreating MOTU multichannel node..."
-  recreate_motu_profile
-  if ! wait_for_sink "$MOTU_SINK" || ! wait_for_sink "$VIRTUAL_SINK"; then
-    echo "Profile recreation did not restore the expected sinks; restoring the prior profile" >&2
-    restore_previous_motu_profile
-    return 1
-  fi
-  loopback_id="$(single_loopback_sink_input_id)"
 
   echo "Restoring the 848 USB and PipeWire playback volume..."
   amixer -c "$card" sset 'Audio Out' 100% unmute >/dev/null
@@ -462,6 +430,9 @@ parse_args() {
       --disable-pulse-device-restore)
         DISABLE_PULSE_DEVICE_RESTORE=true
         ;;
+      --disable-wireplumber-route-restore)
+        DISABLE_WIREPLUMBER_ROUTE_RESTORE=true
+        ;;
       -h|--help)
         usage
         exit 0
@@ -478,12 +449,15 @@ parse_args() {
 
 main() {
   parse_args "$@"
-  if [ "$CHECK_ONLY" = true ] && [ "$DISABLE_PULSE_DEVICE_RESTORE" = true ]; then
-    echo "--disable-pulse-device-restore requires normal recovery mode, not --check" >&2
+  if [ "$CHECK_ONLY" = true ] && { [ "$DISABLE_PULSE_DEVICE_RESTORE" = true ] || [ "$DISABLE_WIREPLUMBER_ROUTE_RESTORE" = true ]; }; then
+    echo "Recovery options require normal recovery mode, not --check" >&2
     exit 2
   fi
   require_cmd amixer
   require_cmd pactl
+  if [ "$DISABLE_WIREPLUMBER_ROUTE_RESTORE" = true ]; then
+    require_cmd wpctl
+  fi
 
   if [ "$CHECK_ONLY" = true ]; then
     check

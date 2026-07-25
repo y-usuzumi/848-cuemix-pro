@@ -285,11 +285,10 @@ audio:
 tools/recover-motu-audio.sh --check
 ```
 
-The normal mode resets the 848's combined input/output multichannel profile,
-restores the USB and PipeWire sink volumes to 100%, and routes the existing
-`VirtualSink.output` loopback to the 848 at full scale. It does not alter the
-default sink or application stream routing. This is a live audio operation, so
-stop playback, recording, and live capture first:
+The normal mode restores the USB and PipeWire sink volumes to 100% and routes
+the existing `VirtualSink.output` loopback to the 848 at full scale. It leaves
+the 848 card profile, default sink, and application stream routing alone. This
+is a live audio operation, so stop playback first:
 
 ```sh
 tools/recover-motu-audio.sh
@@ -307,6 +306,16 @@ below. It disables device-volume restoration for every Pulse device until
 
 ```sh
 tools/recover-motu-audio.sh --disable-pulse-device-restore
+```
+
+On this system, WirePlumber currently has `device.restore-routes=true`; that
+policy can restore the 848 route to zero whenever the device node is recreated.
+To disable route restoration for the current WirePlumber session while running
+recovery, use the explicit switch below. It affects every audio device until
+WirePlumber restarts, but does not save the setting:
+
+```sh
+tools/recover-motu-audio.sh --disable-wireplumber-route-restore
 ```
 
 Read a known or suspected path:
