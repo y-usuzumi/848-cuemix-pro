@@ -5,6 +5,7 @@ MOTU_CARD="alsa_card.usb-MOTU_848_848AFEB9E2-00"
 MOTU_SINK="alsa_output.usb-MOTU_848_848AFEB9E2-00.multichannel-output"
 VIRTUAL_SINK="VirtualSink"
 LOOPBACK_NODE="VirtualSink.output"
+PULSE_UNLINKED_SINK_ID="4294967295"
 
 CHECK_ONLY=false
 DISABLE_WIREPLUMBER_ROUTE_RESTORE=false
@@ -235,13 +236,33 @@ sink_input_is_routed_to() {
   '
 }
 
+sink_input_destination_id() {
+  local input_id="$1"
+
+  pactl list sink-inputs short | awk -v input_id="$input_id" '
+    $1 == input_id { print $2; found = 1; exit }
+    END { exit !found }
+  '
+}
+
 sink_input_destination() {
   local input_id="$1"
   local destination_id
 
-  destination_id="$(pactl list sink-inputs short | awk -v input_id="$input_id" '$1 == input_id { print $2; exit }')"
-  [ -n "$destination_id" ] || return 1
-  pactl list sinks short | awk -v destination_id="$destination_id" '$1 == destination_id { print $2; exit }'
+  destination_id="$(sink_input_destination_id "$input_id")" || return 1
+  pactl list sinks short | awk -v destination_id="$destination_id" '
+    $1 == destination_id { print $2; found = 1; exit }
+    END { exit !found }
+  '
+}
+
+sink_input_mute_state() {
+  local input_id="$1"
+
+  pactl get-sink-input-mute "$input_id" | awk '
+    /^Mute: (yes|no)$/ { print $2; found = 1; exit }
+    END { exit !found }
+  '
 }
 
 sink_input_is_full_scale() {
@@ -279,21 +300,50 @@ single_loopback_sink_input_id() {
 
 route_loopback_to_motu() {
   local input_id="$1"
-  local previous_sink
+  local destination_id
+  local previous_sink=""
+  local previous_mute
 
-  previous_sink="$(sink_input_destination "$input_id")"
-  if [ -z "$previous_sink" ]; then
+  # A dormant PipeWire loopback has PW_ID_ANY (4294967295) as its Pulse sink
+  # ID. It still retains its target.object and can be activated with a move,
+  # but there is no real destination to restore if that activation fails.
+  destination_id="$(sink_input_destination_id "$input_id")" || {
     echo "Could not determine the VirtualSink loopback destination" >&2
     return 1
+  }
+  if [ "$destination_id" != "$PULSE_UNLINKED_SINK_ID" ]; then
+    previous_sink="$(sink_input_destination "$input_id")" || {
+      echo "Could not resolve the VirtualSink loopback destination" >&2
+      return 1
+    }
   fi
+  previous_mute="$(sink_input_mute_state "$input_id")" || {
+    echo "Could not determine the VirtualSink loopback mute state" >&2
+    return 1
+  }
 
   # This is the one graph edge owned by the recovery setup. Leave application
-  # streams and the desktop default sink alone.
-  if ! pactl move-sink-input "$input_id" "$MOTU_SINK" \
-    || ! pactl set-sink-input-mute "$input_id" 0 \
-    || ! pactl set-sink-input-volume "$input_id" 100%; then
-    echo "Could not restore the VirtualSink loopback; returning it to $previous_sink" >&2
-    pactl move-sink-input "$input_id" "$previous_sink" || true
+  # streams and the desktop default sink alone. Keep it muted until the new
+  # route and level have both succeeded so a resumed dormant stream cannot pop.
+  if ! pactl set-sink-input-mute "$input_id" 1; then
+    echo "Could not mute the VirtualSink loopback before routing it" >&2
+    return 1
+  fi
+  if ! pactl move-sink-input "$input_id" "$MOTU_SINK"; then
+    pactl set-sink-input-mute "$input_id" "$previous_mute" || true
+    echo "Could not activate the VirtualSink loopback on the MOTU" >&2
+    return 1
+  fi
+  if ! pactl set-sink-input-volume "$input_id" 100% \
+    || ! pactl set-sink-input-mute "$input_id" 0; then
+    pactl set-sink-input-mute "$input_id" 1 || true
+    if [ -n "$previous_sink" ]; then
+      echo "Could not restore the VirtualSink loopback; returning it to $previous_sink" >&2
+      pactl move-sink-input "$input_id" "$previous_sink" || true
+      pactl set-sink-input-mute "$input_id" "$previous_mute" || true
+    else
+      echo "Could not configure the VirtualSink loopback on the MOTU; it remains muted" >&2
+    fi
     return 1
   fi
 }
