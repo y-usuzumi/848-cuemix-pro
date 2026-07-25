@@ -155,9 +155,7 @@ sink_id() {
 }
 
 sink_input_is_routed_to() {
-  local input_id="$1"
-  local sink="$2"
-  local target_sink_id
+  local input_id="$1" sink="$2" target_sink_id
 
   target_sink_id="$(sink_id "$sink")"
   [ -n "$target_sink_id" ] || return 1
@@ -168,9 +166,7 @@ sink_input_is_routed_to() {
 }
 
 sink_input_targets_sink() {
-  local input_id="$1"
-  local sink="$2"
-  local destination_id
+  local input_id="$1" sink="$2" destination_id
 
   if sink_input_is_routed_to "$input_id" "$sink"; then
     return 0
@@ -429,10 +425,10 @@ recover() {
     if ! verify_recovery "$card" "$loopback_id"; then
       return 1
     fi
-    # Let the silent stream exit, wait for a stable usable node state, then
-    # confirm the native setting survived without relying on the activator.
-    if ! wait_for_silent_motu_activator \
-      || ! wait_for_native_node_to_settle \
+    # Stop the silent stream, wait for a stable usable node state, then confirm
+    # the native setting survived without relying on the activator.
+    stop_silent_motu_activator
+    if ! wait_for_native_node_to_settle \
       || ! native_soft_volumes_are_full_scale; then
       echo "848 native soft volumes did not survive the silent activation stream" >&2
       return 1
@@ -486,6 +482,7 @@ main() {
   fi
   if [ "$USE_NATIVE_VOLUME" = true ]; then
     require_cmd jq
+    require_cmd mktemp
     require_cmd pw-cat
     require_cmd pw-cli
     require_cmd pw-dump

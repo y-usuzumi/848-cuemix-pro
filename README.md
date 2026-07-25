@@ -339,11 +339,11 @@ The 848's PipeWire node advertises 128 native playback channels while its
 Pulse-compatible sink exposes only 32. If a regular recovery still snaps back
 to zero, use the experimental native path to apply software volume to all 128
 advertised channels without using PipeWire's faulty hardware-volume mapping. It
-briefly sends zero-valued PCM directly to the 848 sink so the native node is
-active before changing `softVolumes`; the dormant `VirtualSink.output` route is
-validated by its retained target metadata. The script then confirms that the
-setting survives after the silent stream exits and the node reaches a stable
-usable state:
+briefly sends zero-valued `S32LE` PCM in the 848's exact 128-channel native
+format so the node is active before changing `softVolumes`; the dormant
+`VirtualSink.output` route is validated by its retained target metadata. The
+script then confirms that the setting survives after the silent stream exits
+and the node reaches a stable usable state:
 
 ```sh
 tools/recover-motu-audio.sh --disable-wireplumber-route-restore --native-volume

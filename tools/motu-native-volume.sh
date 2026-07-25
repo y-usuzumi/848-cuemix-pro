@@ -2,9 +2,9 @@
 # Native PipeWire volume support for recover-motu-audio.sh. This file is not
 # intended to be invoked directly; its caller supplies MOTU_SINK.
 
-NATIVE_ACTIVATOR_SAMPLE_COUNT="480000"
 NATIVE_ACTIVATOR_TIMEOUT_SECONDS="12"
 SILENT_ACTIVATOR_PID=""
+SILENT_ACTIVATOR_LOG=""
 
 native_node_json() {
   pw-dump | jq -ce --arg node "$MOTU_SINK" '
@@ -111,14 +111,33 @@ wait_for_native_full_scale_volume() {
 }
 
 start_silent_motu_activator() {
+  local channel_map
+
   # A suspended ALSA node accepts Props syntax but discards dynamic softVolumes.
-  # Feed the MOTU sink zero-valued PCM directly. Waking VirtualSink is not
-  # sufficient because its output stream is deliberately passive while idle.
+  # Match the 848's fixed native format exactly; PipeWire cannot negotiate the
+  # usual stereo FL/FR stream into its 128 AUX-channel ALSA node.
+  channel_map="$(printf 'AUX%s,' $(seq 0 127))"
+  channel_map="${channel_map%,}"
+  SILENT_ACTIVATOR_LOG="$(mktemp "${TMPDIR:-/tmp}/motu-848-pw-cat.XXXXXX")"
   timeout --signal=TERM --kill-after=1s "$NATIVE_ACTIVATOR_TIMEOUT_SECONDS"s \
-    pw-cat --playback --raw --format s16 --rate 48000 --channels 2 \
-      --target "$MOTU_SINK" --volume 1 \
-      --sample-count "$NATIVE_ACTIVATOR_SAMPLE_COUNT" /dev/zero >/dev/null 2>&1 &
+    pw-cat --verbose --playback --raw --format s32 --rate 48000 --channels 128 \
+      --channel-map "$channel_map" --target "$MOTU_SINK" --volume 1 \
+      /dev/zero >/dev/null 2>"$SILENT_ACTIVATOR_LOG" &
   SILENT_ACTIVATOR_PID="$!"
+}
+
+report_silent_motu_activator() {
+  if [ -n "$SILENT_ACTIVATOR_LOG" ] && [ -s "$SILENT_ACTIVATOR_LOG" ]; then
+    echo "pw-cat activation diagnostics:" >&2
+    sed -n '1,80p' "$SILENT_ACTIVATOR_LOG" >&2
+  fi
+}
+
+clear_silent_motu_activator_log() {
+  if [ -n "$SILENT_ACTIVATOR_LOG" ]; then
+    rm -f -- "$SILENT_ACTIVATOR_LOG"
+    SILENT_ACTIVATOR_LOG=""
+  fi
 }
 
 stop_silent_motu_activator() {
@@ -127,6 +146,7 @@ stop_silent_motu_activator() {
     wait "$SILENT_ACTIVATOR_PID" 2>/dev/null || true
     SILENT_ACTIVATOR_PID=""
   fi
+  clear_silent_motu_activator_log
 }
 
 wait_for_active_native_path() {
@@ -136,6 +156,7 @@ wait_for_active_native_path() {
     if ! kill -0 "$SILENT_ACTIVATOR_PID" 2>/dev/null; then
       wait "$SILENT_ACTIVATOR_PID" || true
       SILENT_ACTIVATOR_PID=""
+      report_silent_motu_activator
       echo "The silent MOTU activation stream exited before the 848 became active" >&2
       return 1
     fi
@@ -145,18 +166,10 @@ wait_for_active_native_path() {
     sleep 0.2
   done
 
+  report_silent_motu_activator
+  echo "848 native node state: $(native_node_state 2>/dev/null || echo unavailable)" >&2
   echo "The silent stream did not activate the 848 playback path" >&2
   return 1
-}
-
-wait_for_silent_motu_activator() {
-  [ -n "$SILENT_ACTIVATOR_PID" ] || return 1
-  if ! wait "$SILENT_ACTIVATOR_PID"; then
-    SILENT_ACTIVATOR_PID=""
-    echo "The silent MOTU activation stream exited unexpectedly" >&2
-    return 1
-  fi
-  SILENT_ACTIVATOR_PID=""
 }
 
 wait_for_native_node_to_settle() {
