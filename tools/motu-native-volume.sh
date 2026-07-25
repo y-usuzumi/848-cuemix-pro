@@ -12,6 +12,8 @@ native_node_json() {
           input_ports: .info["n-input-ports"],
           channels: .info.props["audio.channels"],
           port_config: (.info.params.PortConfig[0] // {}),
+          volume_updates_locked: (.info.props["channelmix.lock-volumes"] == true),
+          state_restore_disabled: (.info.props["state.restore-props"] == false),
           props_present: ((.info.params.Props // []) | length > 0),
           soft_mute_present: ((.info.params.Props[0] // {}) | has("softMute")),
           soft_volumes_present: ((.info.params.Props[0] // {}) | has("softVolumes")),
@@ -139,6 +141,16 @@ native_dsp_volume_bypass_is_ready() {
         and (.soft_volumes | all(.[]; . == 1))
       )
     )
+  ' <<< "$node_json" >/dev/null
+}
+
+native_volume_updates_are_locked() {
+  local node_json
+
+  node_json="$(native_node_json)" || return 1
+  jq -e '
+    (.volume_updates_locked == true)
+    and (.state_restore_disabled == true)
   ' <<< "$node_json" >/dev/null
 }
 

@@ -26,7 +26,10 @@ and is served by the same binary.
   helpers live in `tools/motu-native-volume.sh` and are sourced, not run
   directly.
 - `tools/enable-motu-soft-mixer.sh`: opt-in per-device WirePlumber rule for
-  the 848's mismatched UAC hardware-volume control.
+  the 848's mismatched UAC hardware-volume control; retained as an older
+  diagnostic experiment.
+- `tools/enable-motu-volume-lock.sh`: reversible MOTU-only WirePlumber rule
+  that protects the native DSP path from desktop sink-volume changes.
 
 ## Hardware guardrails
 
@@ -49,6 +52,10 @@ and is served by the same binary.
 - `tools/enable-motu-soft-mixer.sh --install` writes a per-device WirePlumber
   rule and restarts WirePlumber, interrupting audio streams. Do not run it as
   automated verification.
+- `tools/enable-motu-volume-lock.sh --install` writes a MOTU playback-node rule
+  and restarts WirePlumber, interrupting audio streams. The rule intentionally
+  rejects desktop volume changes to `848 Multichannel`; use the physical 848
+  knob for monitor level. Do not install or remove it as automated verification.
 - A v0 AVDECC Proxy identity reply with a nonzero reserved field is not a
   standard controller identity. Treat its payload only as a vendor-extension
   candidate. It may be used for a source-backed, single read-only

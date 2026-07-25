@@ -27,12 +27,14 @@ The script does not reset the 848 card profile by default.
 Options:
   --check                         Report the 848 profile, USB mixer, and
                                   PipeWire sink state without changing audio.
+                                  Add --native-dsp for strict native checks.
   --disable-wireplumber-route-restore
                                   Disable WirePlumber device-route restoration
                                   for this WirePlumber session. This affects all
                                   devices until WirePlumber restarts.
   --native-dsp                    Configure the 848's 128-channel DSP ports and
                                   route VirtualSink.output directly to them.
+                                  Requires enable-motu-volume-lock.sh --install.
   --native-volume                 Compatibility alias for --native-dsp.
   -h, --help                      Show this help.
 EOF
@@ -345,7 +347,9 @@ check() {
   if ! sink_exists "$MOTU_SINK"; then
     echo "MOTU PipeWire sink: unavailable" >&2
     status=1
-  elif sink_is_full_scale "$MOTU_SINK" && sink_is_unmuted "$MOTU_SINK"; then
+  elif [ "$USE_NATIVE_VOLUME" != true ] \
+    && sink_is_full_scale "$MOTU_SINK" \
+    && sink_is_unmuted "$MOTU_SINK"; then
     echo "MOTU PipeWire volume: $(sink_volume_summary "$MOTU_SINK")"
     echo "MOTU PipeWire sink: 100% and unmuted"
   elif ! command -v jq >/dev/null 2>&1 || ! command -v pw-dump >/dev/null 2>&1; then
@@ -359,7 +363,13 @@ check() {
     && sink_input_is_full_scale "$loopback_id" \
     && sink_input_is_unmuted "$loopback_id"; then
     echo "MOTU PipeWire volume metadata: $(sink_volume_summary "$MOTU_SINK")"
-    echo "MOTU PipeWire sink: native DSP bypass active through $LOOPBACK_NODE"
+    if native_volume_updates_are_locked; then
+      echo "MOTU PipeWire sink: protected native DSP bypass through $LOOPBACK_NODE"
+    else
+      echo "MOTU PipeWire sink: native DSP bypass is vulnerable to desktop volume changes" >&2
+      echo "Install the protection with tools/enable-motu-volume-lock.sh --install" >&2
+      status=1
+    fi
   else
     echo "MOTU PipeWire volume: $(sink_volume_summary "$MOTU_SINK")"
     echo "MOTU PipeWire sink: not 100% and unmuted; recovery is needed" >&2
@@ -378,6 +388,11 @@ verify_recovery() {
     status=1
   fi
   if [ "$USE_NATIVE_VOLUME" = true ]; then
+    if ! native_volume_updates_are_locked; then
+      echo "848 native sink does not reject desktop volume updates" >&2
+      echo "Run tools/enable-motu-volume-lock.sh --install before native DSP recovery" >&2
+      status=1
+    fi
     if ! native_dsp_volume_bypass_is_ready; then
       echo "848 native DSP volume bypass is not ready" >&2
       status=1
@@ -413,14 +428,18 @@ recover() {
   preflight true
   card="$(alsa_card_index)"
 
-  if [ "$DISABLE_WIREPLUMBER_ROUTE_RESTORE" = true ]; then
-    echo "Disabling WirePlumber device-route restoration for this session..."
-    disable_wireplumber_route_restore
-  fi
-
   if ! sink_exists "$MOTU_SINK"; then
     echo "848 PipeWire sink is unavailable; reconnect the device or select its profile through the system audio settings" >&2
     return 1
+  fi
+  if [ "$USE_NATIVE_VOLUME" = true ] && ! native_volume_updates_are_locked; then
+    echo "848 native sink does not reject desktop volume updates" >&2
+    echo "Run tools/enable-motu-volume-lock.sh --install before native DSP recovery" >&2
+    return 1
+  fi
+  if [ "$DISABLE_WIREPLUMBER_ROUTE_RESTORE" = true ]; then
+    echo "Disabling WirePlumber device-route restoration for this session..."
+    disable_wireplumber_route_restore
   fi
   loopback_id="$(single_loopback_sink_input_id)"
 
@@ -482,8 +501,8 @@ parse_args() {
 
 main() {
   parse_args "$@"
-  if [ "$CHECK_ONLY" = true ] && { [ "$DISABLE_WIREPLUMBER_ROUTE_RESTORE" = true ] || [ "$USE_NATIVE_VOLUME" = true ]; }; then
-    echo "Recovery options require normal recovery mode, not --check" >&2
+  if [ "$CHECK_ONLY" = true ] && [ "$DISABLE_WIREPLUMBER_ROUTE_RESTORE" = true ]; then
+    echo "--disable-wireplumber-route-restore requires normal recovery mode" >&2
     exit 2
   fi
   require_cmd amixer
@@ -493,8 +512,10 @@ main() {
   fi
   if [ "$USE_NATIVE_VOLUME" = true ]; then
     require_cmd jq
-    require_cmd pw-cli
     require_cmd pw-dump
+    if [ "$CHECK_ONLY" != true ]; then
+      require_cmd pw-cli
+    fi
   fi
 
   if [ "$CHECK_ONLY" = true ]; then

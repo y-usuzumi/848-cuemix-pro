@@ -285,6 +285,10 @@ audio:
 tools/recover-motu-audio.sh --check
 ```
 
+Once the native DSP path is configured, require its volume lock, PortConfig,
+and direct links in the same read-only check with
+`tools/recover-motu-audio.sh --check --native-dsp`.
+
 The normal mode restores the USB and PipeWire sink volumes to 100% and routes
 the existing `VirtualSink.output` loopback to the 848 at full scale. It leaves
 the 848 card profile, default sink, and application stream routing alone. This
@@ -309,43 +313,42 @@ WirePlumber restarts, but does not save the setting:
 tools/recover-motu-audio.sh --disable-wireplumber-route-restore
 ```
 
-### 848 Soft Mixer Rule
+### Protecting the Native DSP Path
 
 The 848 exposes 128 USB playback channels but only 16 UAC playback-volume
-controls. On this system, PipeWire's hardware-volume path drives the multichannel
-sink to zero even when route and Pulse restoration are disabled. The optional
-per-device rule below makes PipeWire apply its volume in software instead; it
-does not change the 848's USB `Audio Out` mixer. It is intentionally tied to
-this workstation's 848 USB device name and will not apply to a differently
-named device.
+controls. The KDE `848 Multichannel` slider can silence playback even after the
+native DSP links are established: PipeWire keeps those links active, but the
+adapter stops producing audible output. The per-node rule below sets PipeWire's
+`channelmix.lock-volumes` property and disables WirePlumber property restoration
+only for the MOTU playback node. The 848's physical knob remains the monitor
+level control, while desktop clients can no longer change this physical sink.
+Plasma will continue to display the sink at 0% and keep its slider there because
+the native DSP adapter has no Pulse-compatible volume array; that display is not
+the 848's audible level.
 
 Installation restarts WirePlumber and briefly interrupts every audio stream.
-The ACP setting is consumed while the device is initialized, so test it by
-running recovery afterward:
+The adapter property is consumed while the device node is created:
 
 ```sh
-tools/enable-motu-soft-mixer.sh --install
+tools/enable-motu-volume-lock.sh --install
 ```
 
-To remove the rule later, run `tools/enable-motu-soft-mixer.sh --remove`.
+To inspect or remove the rule later, use `--check` or `--remove`. The older
+`tools/enable-motu-soft-mixer.sh` experiment is retained for diagnostics but is
+not part of the native DSP recovery path.
 
-Afterward, rerun recovery with the session-scoped route-restoration workaround:
-
-```sh
-tools/recover-motu-audio.sh --disable-wireplumber-route-restore
-```
-
-The 848's PipeWire node advertises 128 native playback channels while its
-Pulse-compatible sink exposes only 32. If a regular recovery still snaps back
-to zero, use the experimental native DSP path. It configures the adapter's
-session-scoped 128-channel F32P input ports, then verifies that the full-scale,
-unmuted `VirtualSink.output` stream has two direct links to the 848. In this
-mode the adapter exposes no node-level `softVolumes`, so the stale 0% value in
-the 32-channel Pulse view is bypassed instead of written back to the hardware:
+After installing the lock, configure and verify the native DSP path:
 
 ```sh
 tools/recover-motu-audio.sh --disable-wireplumber-route-restore --native-dsp
 ```
+
+The 848's PipeWire node advertises 128 native playback channels while its
+Pulse-compatible sink exposes only 32. The native DSP path configures the adapter's
+session-scoped 128-channel F32P input ports, then verifies that the full-scale,
+unmuted `VirtualSink.output` stream has two direct links to the 848. In this
+mode the adapter exposes no node-level `softVolumes`, so the stale 0% value in
+the 32-channel Pulse view is bypassed instead of written back to the hardware.
 
 `--native-volume` remains available as a compatibility alias for
 `--native-dsp`.
