@@ -23,6 +23,8 @@ and is served by the same binary.
 - `src/ui.rs` and `src/ui.html`: browser UI template and renderer.
 - `tools/recover-motu-audio.sh`: opt-in PipeWire recovery for the 848's
   full-scale USB playback path.
+- `tools/enable-motu-soft-mixer.sh`: opt-in per-device WirePlumber rule for
+  the 848's mismatched UAC hardware-volume control.
 
 ## Hardware guardrails
 
@@ -42,6 +44,9 @@ and is served by the same binary.
   `pipewire-pulse` restarts. The optional
   `--disable-wireplumber-route-restore` switch affects every WirePlumber device
   route until WirePlumber restarts.
+- `tools/enable-motu-soft-mixer.sh --install` writes a per-device WirePlumber
+  rule and restarts WirePlumber, interrupting audio streams. Do not run it as
+  automated verification.
 - A v0 AVDECC Proxy identity reply with a nonzero reserved field is not a
   standard controller identity. Treat its payload only as a vendor-extension
   candidate. It may be used for a source-backed, single read-only

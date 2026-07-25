@@ -318,6 +318,30 @@ WirePlumber restarts, but does not save the setting:
 tools/recover-motu-audio.sh --disable-wireplumber-route-restore
 ```
 
+### 848 Soft Mixer Rule
+
+The 848 exposes 128 USB playback channels but only 16 UAC playback-volume
+controls. On this system, PipeWire's hardware-volume path drives the multichannel
+sink to zero even when route and Pulse restoration are disabled. The optional
+per-device rule below makes PipeWire apply its volume in software instead; it
+does not change the 848's USB `Audio Out` mixer. It is intentionally tied to
+this workstation's 848 USB device name and will not apply to a differently
+named device.
+
+Installation restarts WirePlumber and briefly interrupts every audio stream:
+
+```sh
+tools/enable-motu-soft-mixer.sh --install
+```
+
+To remove the rule later, run `tools/enable-motu-soft-mixer.sh --remove`.
+
+Afterward, rerun recovery with the two session-scoped restoration workarounds:
+
+```sh
+tools/recover-motu-audio.sh --disable-wireplumber-route-restore --disable-pulse-device-restore
+```
+
 Read a known or suspected path:
 
 ```sh
