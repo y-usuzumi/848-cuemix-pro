@@ -354,7 +354,7 @@ check() {
     status=1
   elif loopback_id="$(single_loopback_sink_input_id)" \
     && native_dsp_volume_bypass_is_ready \
-    && native_loopback_links_are_active \
+    && native_loopback_links_are_connected \
     && sink_is_unmuted "$MOTU_SINK" \
     && sink_input_is_full_scale "$loopback_id" \
     && sink_input_is_unmuted "$loopback_id"; then
@@ -382,8 +382,8 @@ verify_recovery() {
       echo "848 native DSP volume bypass is not ready" >&2
       status=1
     fi
-    if ! native_loopback_links_are_active; then
-      echo "VirtualSink.output does not have two active DSP links to the 848" >&2
+    if ! native_loopback_links_are_connected; then
+      echo "VirtualSink.output does not have two DSP links to the 848" >&2
       status=1
     fi
   elif ! sink_is_full_scale "$MOTU_SINK"; then

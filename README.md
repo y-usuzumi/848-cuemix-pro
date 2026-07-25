@@ -339,7 +339,7 @@ The 848's PipeWire node advertises 128 native playback channels while its
 Pulse-compatible sink exposes only 32. If a regular recovery still snaps back
 to zero, use the experimental native DSP path. It configures the adapter's
 session-scoped 128-channel F32P input ports, then verifies that the full-scale,
-unmuted `VirtualSink.output` stream has two active links to the 848. In this
+unmuted `VirtualSink.output` stream has two direct links to the 848. In this
 mode the adapter exposes no node-level `softVolumes`, so the stale 0% value in
 the 32-channel Pulse view is bypassed instead of written back to the hardware:
 

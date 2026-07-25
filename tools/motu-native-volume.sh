@@ -142,7 +142,7 @@ native_dsp_volume_bypass_is_ready() {
   ' <<< "$node_json" >/dev/null
 }
 
-native_loopback_links_are_active() {
+native_loopback_links_are_connected() {
   pw-dump | jq -e \
     --arg motu "$MOTU_SINK" \
     --arg loopback "$LOOPBACK_NODE" '
@@ -197,13 +197,13 @@ native_loopback_links_are_active() {
           and ($loopback_right | length) == 1
           and ($links | length) == 2
           and any($links[];
-            .info.state == "active"
+            (.info.state == "active" or .info.state == "paused")
             and .info.props["link.input.node"] == $motu_id
             and .info.props["link.input.port"] == $motu_left[0].id
             and .info.props["link.output.port"] == $loopback_left[0].id
           )
           and any($links[];
-            .info.state == "active"
+            (.info.state == "active" or .info.state == "paused")
             and .info.props["link.input.node"] == $motu_id
             and .info.props["link.input.port"] == $motu_right[0].id
             and .info.props["link.output.port"] == $loopback_right[0].id
@@ -218,12 +218,12 @@ wait_for_native_loopback_links() {
   local attempts="${1:-20}"
 
   for _ in $(seq 1 "$attempts"); do
-    if native_loopback_links_are_active; then
+    if native_loopback_links_are_connected; then
       return 0
     fi
     sleep 0.2
   done
 
-  echo "VirtualSink.output did not establish two active DSP links to the 848" >&2
+  echo "VirtualSink.output did not establish two DSP links to the 848" >&2
   return 1
 }
