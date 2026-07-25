@@ -259,8 +259,12 @@ sink_input_destination() {
 sink_input_mute_state() {
   local input_id="$1"
 
-  pactl get-sink-input-mute "$input_id" | awk '
-    /^Mute: (yes|no)$/ { print $2; found = 1; exit }
+  pactl list sink-inputs | awk -v input_id="$input_id" '
+    /^Sink Input #[0-9]+$/ {
+      if (in_input) exit
+      in_input = $3 == "#" input_id
+    }
+    in_input && /^[[:space:]]*Mute: (yes|no)$/ { print $2; found = 1; exit }
     END { exit !found }
   '
 }
@@ -283,8 +287,10 @@ sink_input_is_full_scale() {
 
 sink_input_is_unmuted() {
   local input_id="$1"
+  local mute_state
 
-  pactl get-sink-input-mute "$input_id" | awk '/^Mute: no$/ { found = 1 } END { exit !found }'
+  mute_state="$(sink_input_mute_state "$input_id")" || return 1
+  [ "$mute_state" = "no" ]
 }
 
 single_loopback_sink_input_id() {
