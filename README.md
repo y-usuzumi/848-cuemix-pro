@@ -328,7 +328,9 @@ does not change the 848's USB `Audio Out` mixer. It is intentionally tied to
 this workstation's 848 USB device name and will not apply to a differently
 named device.
 
-Installation restarts WirePlumber and briefly interrupts every audio stream:
+Installation restarts WirePlumber and briefly interrupts every audio stream.
+The ACP setting is consumed while the device is initialized, so test it by
+running recovery afterward:
 
 ```sh
 tools/enable-motu-soft-mixer.sh --install

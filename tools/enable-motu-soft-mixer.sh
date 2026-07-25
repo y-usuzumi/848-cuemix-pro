@@ -14,7 +14,7 @@ software for this MOTU 848. Installation or removal restarts WirePlumber and
 briefly interrupts audio streams.
 
 Options:
-  --check    Report whether the rule is installed and active (default).
+  --check    Report whether the rule is installed (default).
   --install  Write the rule and restart WirePlumber.
   --remove   Remove the rule and restart WirePlumber.
   -h, --help Show this help.
@@ -26,26 +26,6 @@ require_cmd() {
     echo "Missing required command: $1" >&2
     exit 1
   fi
-}
-
-device_has_soft_mixer() {
-  pw-dump | jq -e --arg device "$MOTU_CARD" '
-    any(.[]; .type == "PipeWire:Interface:Device"
-      and .info.props["device.name"] == $device
-      and .info.props["api.alsa.soft-mixer"] == "true")
-  ' >/dev/null
-}
-
-wait_for_soft_mixer() {
-  local attempt
-
-  for attempt in $(seq 1 25); do
-    if device_has_soft_mixer; then
-      return 0
-    fi
-    sleep 0.2
-  done
-  return 1
 }
 
 restart_wireplumber() {
@@ -67,14 +47,14 @@ restore_rule() {
 }
 
 write_rule() {
-  cat >"$RULE_FILE" <<'EOF'
+  cat >"$RULE_FILE" <<EOF
 # The 848 has 128 playback channels but only 16 UAC playback-volume controls.
 # This ACP device rule prevents PipeWire from driving that mismatched control.
 monitor.alsa.rules = [
   {
     matches = [
       {
-        device.name = "alsa_card.usb-MOTU_848_848AFEB9E2-00"
+        device.name = "$MOTU_CARD"
       }
     ]
     actions = {
@@ -111,22 +91,15 @@ case "${1:---check}" in
 esac
 
 if [ "$mode" = "check" ]; then
-  require_cmd jq
-  require_cmd pw-dump
   if [ ! -f "$RULE_FILE" ]; then
     echo "MOTU 848 soft-mixer rule is not installed"
-  elif device_has_soft_mixer; then
-    echo "MOTU 848 soft-mixer rule is installed and active: $RULE_FILE"
   else
-    echo "MOTU 848 soft-mixer rule is installed but inactive: restart WirePlumber" >&2
-    exit 1
+    echo "MOTU 848 soft-mixer rule is installed: $RULE_FILE"
   fi
   exit 0
 fi
 
 require_cmd systemctl
-require_cmd jq
-require_cmd pw-dump
 mkdir -p "$RULE_DIR"
 backup_file=""
 if [ -f "$RULE_FILE" ]; then
@@ -136,13 +109,13 @@ fi
 
 if [ "$mode" = "install" ]; then
   write_rule
-  if ! restart_wireplumber || ! wait_for_soft_mixer; then
-    echo "Soft-mixer rule did not take effect; restoring the previous configuration" >&2
+  if ! restart_wireplumber; then
+    echo "Could not restart WirePlumber; restoring the previous configuration" >&2
     restore_rule "$backup_file"
     exit 1
   fi
   rm -f "$backup_file"
-  echo "Installed and verified $RULE_FILE."
+  echo "Installed $RULE_FILE and restarted WirePlumber."
   exit 0
 fi
 
