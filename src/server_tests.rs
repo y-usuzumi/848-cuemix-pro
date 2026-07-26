@@ -84,3 +84,30 @@ fn enforces_a_total_request_deadline() {
         .unwrap();
     assert!(check_request_deadline(started, Duration::from_millis(1)).is_err());
 }
+
+#[test]
+fn reads_the_entity_id_from_a_datastore_snapshot() {
+    assert_eq!(
+        datastore_entity_id("{\"uid\":\"0001f2fffefeb9e2\"}"),
+        Ok(0x0001_f2ff_fefe_b9e2)
+    );
+    assert!(datastore_entity_id("{\"uid\":\"not-an-entity-id\"}").is_err());
+}
+
+#[test]
+fn formats_all_raw_meter_records_and_the_validated_fader_pairs() {
+    let snapshot = MixerMeters {
+        records: vec![MixerMeterRecord {
+            property_id: 0x13ad,
+            index: 0,
+            values: (0..22).collect(),
+        }],
+        updated_at: Some(Instant::now()),
+        error: None,
+    };
+    let json = mixer_meters_json(&snapshot);
+    assert!(json.contains("\"property_id\":\"13ad\""));
+    assert!(json.contains("\"main_host_11_12\":5"));
+    assert!(json.contains("\"headphone_host_11_12\":5"));
+    assert!(json.contains("\"main_line_in_5_6\":10"));
+}

@@ -1,5 +1,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::device::{parse_http_response, HttpResponse};
@@ -24,6 +26,316 @@ mod avdecc_descriptor;
 mod avdecc_probe;
 
 pub(crate) use avdecc_probe::{probe, write_probe_result, DescriptorRead};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MixerFader {
+    MainHost11To12,
+    HeadphoneHost11To12,
+    MainLineIn5To6,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MixerLevel {
+    Minus12,
+    Minus60,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MixerMeters {
+    pub(crate) records: Vec<MixerMeterRecord>,
+    pub(crate) updated_at: Option<Instant>,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MixerMeterRecord {
+    pub(crate) property_id: u16,
+    pub(crate) index: u8,
+    pub(crate) values: Vec<u16>,
+}
+
+impl MixerFader {
+    pub(crate) fn parse(bus: &str, source: &str) -> Result<Self, String> {
+        match (bus, source) {
+            ("main-1-2", "host-11-12") => Ok(Self::MainHost11To12),
+            ("headphone-mix", "host-11-12") => Ok(Self::HeadphoneHost11To12),
+            ("main-1-2", "line-in-5-6") => Ok(Self::MainLineIn5To6),
+            _ => Err("that mixer bus/source pair has not been capture-validated yet".to_string()),
+        }
+    }
+
+    fn property_and_index(self) -> (u16, u16) {
+        match self {
+            Self::MainHost11To12 => (0x841a, 0x0a00),
+            Self::HeadphoneHost11To12 => (0x83f8, 0x0a00),
+            Self::MainLineIn5To6 => (0x841a, 0x1000),
+        }
+    }
+
+    pub(crate) fn meter_slot(self) -> (u16, u8, usize) {
+        // Protocol ...:04 exposes 32 stereo-pair samples for the 64-channel
+        // Mix In bank as 0x13ad:0. The paired source map places Host 11-12 at
+        // slot 5 and Analog (Line) 5-6 at slot 10. The vendor fader index for
+        // the latter is a source-family selector, not its Mix In slot number.
+        match self {
+            Self::MainHost11To12 | Self::HeadphoneHost11To12 => (0x13ad, 0, 5),
+            Self::MainLineIn5To6 => (0x13ad, 0, 10),
+        }
+    }
+}
+
+impl MixerLevel {
+    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "-12" => Ok(Self::Minus12),
+            "-60" => Ok(Self::Minus60),
+            _ => {
+                Err("only capture-validated mixer levels -12 and -60 dB are available".to_string())
+            }
+        }
+    }
+
+    fn encoded_value(self) -> u32 {
+        match self {
+            Self::Minus12 => 0x0040_4de6,
+            Self::Minus60 => 0x0000_4189,
+        }
+    }
+}
+
+/// Sends one user-requested fader update through the capture-validated vendor
+/// session. This is intentionally limited to the exact bus/source/value triples
+/// observed in CueMix Pro captures; it performs no automatic hardware test.
+pub(crate) fn set_mixer_fader(
+    host: &str,
+    target_entity_id: u64,
+    fader: MixerFader,
+    level: MixerLevel,
+    timeout: Duration,
+) -> Result<(), String> {
+    // The 848 occasionally rejects a just-reopened CueMix session. Repeating
+    // the same explicitly requested fader value is idempotent, so make one
+    // fresh-session retry rather than exposing a spurious UI failure.
+    const RETRY_DELAY: Duration = Duration::from_millis(150);
+    match set_mixer_fader_once(host, target_entity_id, fader, level, timeout) {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            thread::sleep(RETRY_DELAY);
+            set_mixer_fader_once(host, target_entity_id, fader, level, timeout).map_err(
+                |retry_error| {
+                    format!(
+                        "CueMix fader write failed after one fresh-session retry; first attempt: {first_error}; retry: {retry_error}"
+                    )
+                },
+            )
+        }
+    }
+}
+
+fn set_mixer_fader_once(
+    host: &str,
+    target_entity_id: u64,
+    fader: MixerFader,
+    level: MixerLevel,
+    timeout: Duration,
+) -> Result<(), String> {
+    const CUE_MIX_PROXY_ADDRESS: [u8; 6] = [0x01, 0x00, 0x00, 0x00, 0x01, 0x00];
+    let mut proxy = AvdeccProxy::connect(host, "/", timeout)?;
+    let controller_entity_id = proxy
+        .request_entity_id(CUE_MIX_PROXY_ADDRESS, timeout)?
+        .entity_id
+        .ok_or("AVDECC Proxy did not return a controller identity")?;
+    let next_sequence =
+        proxy.start_vendor_state(target_entity_id, controller_entity_id, timeout)?;
+    let (property, index) = fader.property_and_index();
+    let mut data = Vec::with_capacity(9);
+    data.extend_from_slice(&property.to_be_bytes());
+    data.extend_from_slice(&index.to_be_bytes());
+    data.push(4);
+    data.extend_from_slice(&level.encoded_value().to_be_bytes());
+    proxy.vendor_request(
+        target_entity_id,
+        controller_entity_id,
+        next_sequence,
+        [0x00, 0x01, 0xf2, 0x00, 0x00, 0x03],
+        &data,
+        timeout,
+    )?;
+    Ok(())
+}
+
+/// Starts the capture-validated read-only meter lifecycle on a dedicated
+/// proxy session. The returned receiver owns no hardware controls; dropping
+/// its stop sender closes only the local TCP session.
+pub(crate) fn start_mixer_meter_worker(
+    host: String,
+    target_entity_id: u64,
+    timeout: Duration,
+) -> (mpsc::Sender<mpsc::Sender<()>>, Arc<Mutex<MixerMeters>>) {
+    let (stop_sender, stop_receiver) = mpsc::channel();
+    let meters = Arc::new(Mutex::new(MixerMeters::default()));
+    let worker_meters = Arc::clone(&meters);
+    thread::spawn(move || {
+        run_mixer_meter_worker(
+            &host,
+            target_entity_id,
+            timeout,
+            stop_receiver,
+            worker_meters,
+        )
+    });
+    (stop_sender, meters)
+}
+
+fn run_mixer_meter_worker(
+    host: &str,
+    target_entity_id: u64,
+    timeout: Duration,
+    stop_receiver: mpsc::Receiver<mpsc::Sender<()>>,
+    meters: Arc<Mutex<MixerMeters>>,
+) {
+    const RETRY_DELAY: Duration = Duration::from_millis(500);
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+    loop {
+        if let Ok(reply) = stop_receiver.try_recv() {
+            let _ = reply.send(());
+            return;
+        }
+        match MixerMeterSession::open(host, target_entity_id, timeout) {
+            Ok(mut session) => loop {
+                if let Ok(reply) = stop_receiver.try_recv() {
+                    let _ = reply.send(());
+                    return;
+                }
+                match session.poll(timeout) {
+                    Ok(records) => update_mixer_meters(&meters, records, None),
+                    Err(error) => {
+                        update_mixer_meters(&meters, Vec::new(), Some(error));
+                        break;
+                    }
+                }
+                thread::sleep(POLL_INTERVAL);
+            },
+            Err(error) => update_mixer_meters(&meters, Vec::new(), Some(error)),
+        }
+        if let Ok(reply) = stop_receiver.recv_timeout(RETRY_DELAY) {
+            let _ = reply.send(());
+            return;
+        }
+    }
+}
+
+fn update_mixer_meters(
+    meters: &Arc<Mutex<MixerMeters>>,
+    records: Vec<MixerMeterRecord>,
+    error: Option<String>,
+) {
+    if let Ok(mut current) = meters.lock() {
+        if !records.is_empty() {
+            current.records = records;
+            current.updated_at = Some(Instant::now());
+        }
+        current.error = error;
+    }
+}
+
+struct MixerMeterSession {
+    proxy: AvdeccProxy,
+    target_entity_id: u64,
+    controller_entity_id: u64,
+    next_sequence: u16,
+}
+
+impl MixerMeterSession {
+    fn open(host: &str, target_entity_id: u64, timeout: Duration) -> Result<Self, String> {
+        const CUE_MIX_PROXY_ADDRESS: [u8; 6] = [0x01, 0x00, 0x00, 0x00, 0x01, 0x00];
+        let mut proxy = AvdeccProxy::connect(host, "/", timeout)?;
+        let controller_entity_id = proxy
+            .request_entity_id(CUE_MIX_PROXY_ADDRESS, timeout)?
+            .entity_id
+            .ok_or("AVDECC Proxy did not return a controller identity")?;
+        let next_sequence =
+            proxy.start_vendor_state(target_entity_id, controller_entity_id, timeout)?;
+        Ok(Self {
+            proxy,
+            target_entity_id,
+            controller_entity_id,
+            next_sequence,
+        })
+    }
+
+    fn poll(&mut self, timeout: Duration) -> Result<Vec<MixerMeterRecord>, String> {
+        const METER_PROTOCOL: [u8; 6] = [0x00, 0x01, 0xf2, 0x00, 0x00, 0x04];
+        const CAPTURED_METER_PAGES: usize = 2;
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.proxy.write_vendor_request(
+            self.target_entity_id,
+            self.controller_entity_id,
+            sequence,
+            METER_PROTOCOL,
+            &[],
+        )?;
+        let deadline = Instant::now() + timeout;
+        let mut records = Vec::new();
+        let mut pages = 0;
+        while pages < CAPTURED_METER_PAGES {
+            let frame = self
+                .proxy
+                .read_frame_until(deadline)?
+                .ok_or("timed out waiting for CueMix meter response")?;
+            let Ok(data) = vendor_response_data(
+                &frame,
+                self.target_entity_id,
+                self.controller_entity_id,
+                sequence,
+                METER_PROTOCOL,
+            ) else {
+                continue;
+            };
+            records.extend(parse_mixer_meter_page(data)?);
+            pages += 1;
+        }
+        Ok(records)
+    }
+}
+
+fn parse_mixer_meter_page(data: &[u8]) -> Result<Vec<MixerMeterRecord>, String> {
+    // Captured ...:04 pages begin with an opaque u16 page counter, followed by
+    // property/u8-bank/u8-byte-length records. Meter samples are big-endian
+    // u16 values; their dB calibration has not yet been established.
+    let mut cursor = 2usize;
+    let mut records = Vec::new();
+    if data.len() < cursor {
+        return Err("truncated CueMix meter page counter".to_string());
+    }
+    while cursor < data.len() {
+        let header = data
+            .get(cursor..cursor + 4)
+            .ok_or("truncated CueMix meter record header")?;
+        let property_id = u16::from_be_bytes([header[0], header[1]]);
+        let index = header[2];
+        let byte_len = header[3] as usize;
+        cursor += 4;
+        if !byte_len.is_multiple_of(2) {
+            return Err("CueMix meter record has an odd sample length".to_string());
+        }
+        let bytes = data
+            .get(cursor..cursor + byte_len)
+            .ok_or("truncated CueMix meter record samples")?;
+        let values = bytes
+            .chunks_exact(2)
+            .map(|sample| u16::from_be_bytes([sample[0], sample[1]]))
+            .collect();
+        cursor += byte_len;
+        records.push(MixerMeterRecord {
+            property_id,
+            index,
+            values,
+        });
+    }
+    Ok(records)
+}
 
 // IEEE 1722.1-2013 Annex C APPDU: version, type, payload length, EUI-48,
 // then a reserved/status u16 before the payload.
@@ -237,6 +549,121 @@ impl AvdeccProxy {
         }
     }
 
+    fn start_vendor_state(
+        &mut self,
+        target_entity_id: u64,
+        controller_entity_id: u64,
+        timeout: Duration,
+    ) -> Result<u16, String> {
+        const VENDOR_STATE_PROTOCOL: [u8; 6] = [0x00, 0x01, 0xf2, 0x00, 0x00, 0x01];
+        const MAX_INITIAL_STATE_PAGES: usize = 256;
+
+        let mut sequence = 1u16;
+        let mut response = self.vendor_request(
+            target_entity_id,
+            controller_entity_id,
+            sequence,
+            VENDOR_STATE_PROTOCOL,
+            &[],
+            timeout,
+        )?;
+        for _ in 0..MAX_INITIAL_STATE_PAGES {
+            let state = vendor_response_data(
+                &response,
+                target_entity_id,
+                controller_entity_id,
+                sequence,
+                VENDOR_STATE_PROTOCOL,
+            )?;
+            if state.is_empty() {
+                return Ok(sequence.wrapping_add(1));
+            }
+            let previous_sequence = sequence;
+            sequence = sequence.wrapping_add(1);
+            response = self.vendor_request(
+                target_entity_id,
+                controller_entity_id,
+                sequence,
+                VENDOR_STATE_PROTOCOL,
+                &previous_sequence.to_be_bytes(),
+                timeout,
+            )?;
+        }
+        Err("initial CueMix vendor-state snapshot exceeded 256 pages".to_string())
+    }
+
+    fn vendor_request(
+        &mut self,
+        target_entity_id: u64,
+        controller_entity_id: u64,
+        sequence: u16,
+        protocol: [u8; 6],
+        data: &[u8],
+        timeout: Duration,
+    ) -> Result<AppFrame, String> {
+        self.write_vendor_request(
+            target_entity_id,
+            controller_entity_id,
+            sequence,
+            protocol,
+            data,
+        )?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            let frame = self
+                .read_frame_until(deadline)?
+                .ok_or("timed out waiting for CueMix vendor response")?;
+            if vendor_response_data(
+                &frame,
+                target_entity_id,
+                controller_entity_id,
+                sequence,
+                protocol,
+            )
+            .is_ok()
+            {
+                return Ok(frame);
+            }
+        }
+    }
+
+    fn write_vendor_request(
+        &mut self,
+        target_entity_id: u64,
+        controller_entity_id: u64,
+        sequence: u16,
+        protocol: [u8; 6],
+        data: &[u8],
+    ) -> Result<(), String> {
+        const VENDOR_FIXED_LENGTH: usize = 16;
+        let control_data_length = VENDOR_FIXED_LENGTH
+            .checked_add(data.len())
+            .ok_or("vendor command is too large")?;
+        let control_data_length =
+            u16::try_from(control_data_length).map_err(|_| "vendor command is too large")?;
+        let mut payload = Vec::with_capacity(VENDOR_FIXED_LENGTH + 12 + data.len());
+        payload.extend_from_slice(&[0xfb, 0x06]);
+        payload.extend_from_slice(&control_data_length.to_be_bytes());
+        payload.extend_from_slice(&target_entity_id.to_be_bytes());
+        payload.extend_from_slice(&controller_entity_id.to_be_bytes());
+        payload.extend_from_slice(&sequence.to_be_bytes());
+        payload.extend_from_slice(&protocol);
+        payload.extend_from_slice(data);
+        self.write_frame(&AppFrame {
+            version: 0,
+            message_type: APP_AVDECC_FROM_APC,
+            address: ethernet_address_from_entity_id(target_entity_id),
+            reserved: 0,
+            payload,
+        })
+    }
+
+    fn write_frame(&mut self, frame: &AppFrame) -> Result<(), String> {
+        self.stream
+            .write_all(&frame.encode()?)
+            .map_err(|error| format!("write AVDECC Proxy frame failed: {error}"))
+    }
+
     fn read_frame_until(&mut self, deadline: Instant) -> Result<Option<AppFrame>, String> {
         let Some(header) = self.read_exact_until(APP_HEADER_LEN, deadline)? else {
             return Ok(None);
@@ -329,6 +756,42 @@ fn is_entity_id_response(frame: &AppFrame, primary_mac: [u8; 6]) -> bool {
     frame.version == 0
         && frame.message_type == APP_ENTITY_ID_RESPONSE
         && frame.address == primary_mac
+}
+
+fn ethernet_address_from_entity_id(entity_id: u64) -> [u8; 6] {
+    let entity_id = entity_id.to_be_bytes();
+    [
+        entity_id[0],
+        entity_id[1],
+        entity_id[2],
+        entity_id[5],
+        entity_id[6],
+        entity_id[7],
+    ]
+}
+
+fn vendor_response_data(
+    frame: &AppFrame,
+    target_entity_id: u64,
+    controller_entity_id: u64,
+    sequence: u16,
+    protocol: [u8; 6],
+) -> Result<&[u8], String> {
+    const VENDOR_RESPONSE_HEADER_LEN: usize = 28;
+    if frame.message_type != APP_AVDECC_FROM_APS
+        || frame.address != ethernet_address_from_entity_id(target_entity_id)
+        || frame.payload.get(..2) != Some(&[0xfb, 0x07])
+        || frame.payload.get(4..12) != Some(target_entity_id.to_be_bytes().as_slice())
+        || frame.payload.get(12..20) != Some(controller_entity_id.to_be_bytes().as_slice())
+        || frame.payload.get(20..22) != Some(sequence.to_be_bytes().as_slice())
+        || frame.payload.get(22..28) != Some(protocol.as_slice())
+    {
+        return Err("not the expected CueMix vendor response".to_string());
+    }
+    frame
+        .payload
+        .get(VENDOR_RESPONSE_HEADER_LEN..)
+        .ok_or("truncated CueMix vendor response".to_string())
 }
 
 fn timeout_error(received: &[u8], expected: usize) -> String {

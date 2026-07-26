@@ -3,8 +3,13 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::avdecc::{
+    set_mixer_fader, start_mixer_meter_worker, MixerFader, MixerLevel, MixerMeterRecord,
+    MixerMeters,
+};
 use crate::device::{datastore_write_request, json_escape, percent_decode, DeviceClient};
 use crate::discovery::{browser_control_hosts, discover_avdecc, DiscoveryResult};
 use crate::probe::{probe_device, probe_result_json};
@@ -33,6 +38,81 @@ enum ServerScope {
     Discovered(Vec<DiscoveryResult>),
 }
 
+#[derive(Default)]
+struct MeterHub {
+    workers: Mutex<HashMap<String, MeterWorker>>,
+}
+
+struct MeterWorker {
+    stop_sender: mpsc::Sender<mpsc::Sender<()>>,
+    meters: Arc<Mutex<MixerMeters>>,
+}
+
+impl MeterHub {
+    fn existing_snapshot(&self, host: &str) -> Result<Option<MixerMeters>, String> {
+        let meters = self
+            .workers
+            .lock()
+            .map_err(|_| "meter worker registry is unavailable".to_string())?
+            .get(host)
+            .map(|worker| Arc::clone(&worker.meters));
+        meters
+            .map(|meters| {
+                meters
+                    .lock()
+                    .map(|snapshot| snapshot.clone())
+                    .map_err(|_| "meter worker data is unavailable".to_string())
+            })
+            .transpose()
+    }
+
+    fn start_and_snapshot(
+        &self,
+        host: &str,
+        target_entity_id: u64,
+        timeout: Duration,
+    ) -> Result<MixerMeters, String> {
+        let meters = {
+            let mut workers = self
+                .workers
+                .lock()
+                .map_err(|_| "meter worker registry is unavailable".to_string())?;
+            let worker = workers.entry(host.to_string()).or_insert_with(|| {
+                let (stop_sender, meters) =
+                    start_mixer_meter_worker(host.to_string(), target_entity_id, timeout);
+                MeterWorker {
+                    stop_sender,
+                    meters,
+                }
+            });
+            Arc::clone(&worker.meters)
+        };
+        meters
+            .lock()
+            .map(|snapshot| snapshot.clone())
+            .map_err(|_| "meter worker data is unavailable".to_string())
+    }
+
+    fn stop(&self, host: &str, timeout: Duration) -> Result<(), String> {
+        let worker = self
+            .workers
+            .lock()
+            .map_err(|_| "meter worker registry is unavailable".to_string())?
+            .remove(host);
+        let Some(worker) = worker else {
+            return Ok(());
+        };
+        let (stopped_sender, stopped_receiver) = mpsc::channel();
+        worker
+            .stop_sender
+            .send(stopped_sender)
+            .map_err(|_| "meter worker stopped unexpectedly".to_string())?;
+        stopped_receiver
+            .recv_timeout(timeout)
+            .map_err(|_| "meter worker did not close its proxy session in time".to_string())
+    }
+}
+
 pub(crate) fn serve(
     default_host: Option<&str>,
     listen: &str,
@@ -52,6 +132,7 @@ pub(crate) fn serve(
         .map_err(|error| format!("listen on {listen_address} failed: {error}"))?;
     let expected_origin = listener_origin(&listener)?;
     let session_token = new_session_token()?;
+    let meter_hub = MeterHub::default();
     println!("cuemix-848 UI: {expected_origin}");
     match &scope {
         ServerScope::Configured(host) => println!("default device: {host}"),
@@ -68,6 +149,7 @@ pub(crate) fn serve(
                     &scope,
                     &expected_origin,
                     &session_token,
+                    &meter_hub,
                     timeout,
                 ) {
                     eprintln!("request failed: {error}");
@@ -131,6 +213,7 @@ fn handle_browser_request(
     scope: &ServerScope,
     expected_origin: &str,
     session_token: &str,
+    meter_hub: &MeterHub,
     timeout: Duration,
 ) -> Result<(), String> {
     stream
@@ -149,6 +232,7 @@ fn handle_browser_request(
             scope,
             expected_origin,
             session_token,
+            meter_hub,
             timeout,
         ),
         Err(error) => json_error(400, &error),
@@ -314,6 +398,7 @@ fn route_browser_request(
     scope: &ServerScope,
     expected_origin: &str,
     session_token: &str,
+    meter_hub: &MeterHub,
     timeout: Duration,
 ) -> BrowserResponse {
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
@@ -360,6 +445,10 @@ fn route_browser_request(
             let params = parse_query(query);
             proxy_get_or_error(&params, scope, timeout)
         }
+        ("GET", "/api/mixer/meters") => {
+            let params = parse_query(query);
+            proxy_mixer_meters_or_error(&params, scope, meter_hub, timeout)
+        }
         ("POST", "/api/set") => {
             let mut params = parse_query(query);
             params.extend(parse_query(body));
@@ -367,6 +456,14 @@ fn route_browser_request(
                 return json_error(403, "invalid origin or session token");
             }
             proxy_set_or_error(&params, scope, timeout)
+        }
+        ("POST", "/api/mixer/fader") => {
+            let mut params = parse_query(query);
+            params.extend(parse_query(body));
+            if !is_authorized(origin, params.get("token"), expected_origin, session_token) {
+                return json_error(403, "invalid origin or session token");
+            }
+            proxy_mixer_fader_or_error(&params, scope, meter_hub, timeout)
         }
         _ => BrowserResponse {
             status: 404,
@@ -458,6 +555,151 @@ fn proxy_set_or_error(
         Err(error) => return json_error(400, &error),
     };
     proxy_request(&host, method, &request_path, Some(&body), timeout)
+}
+
+fn proxy_mixer_fader_or_error(
+    params: &HashMap<String, String>,
+    scope: &ServerScope,
+    meter_hub: &MeterHub,
+    timeout: Duration,
+) -> BrowserResponse {
+    let Some(bus) = params.get("bus") else {
+        return json_error(400, "missing mixer bus");
+    };
+    let Some(source) = params.get("source") else {
+        return json_error(400, "missing mixer source");
+    };
+    let Some(level) = params.get("level") else {
+        return json_error(400, "missing mixer level");
+    };
+    let fader = match MixerFader::parse(bus, source) {
+        Ok(fader) => fader,
+        Err(error) => return json_error(400, &error),
+    };
+    let level = match MixerLevel::parse(level) {
+        Ok(level) => level,
+        Err(error) => return json_error(400, &error),
+    };
+    let host = match allowed_host(params, scope) {
+        Ok(host) => host,
+        Err(error) => return json_error(400, &error),
+    };
+    match meter_hub.existing_snapshot(&host) {
+        Ok(Some(snapshot)) => return json_response(200, mixer_meters_json(&snapshot)),
+        Ok(None) => {}
+        Err(error) => return json_error(502, &error),
+    }
+    let target_entity_id = match DeviceClient::new(&host, timeout)
+        .and_then(|client| client.request("GET", "/datastore", None))
+        .and_then(|response| datastore_entity_id(&response.body))
+    {
+        Ok(entity_id) => entity_id,
+        Err(error) => return json_error(502, &error),
+    };
+    // Meter polling owns its own vendor session. Close it before opening the
+    // short-lived fader session so the 848 never sees competing controllers
+    // from this local server.
+    if let Err(error) = meter_hub.stop(&host, timeout) {
+        return json_error(502, &error);
+    }
+    match set_mixer_fader(&host, target_entity_id, fader, level, timeout) {
+        Ok(()) => json_response(
+            200,
+            "{\"status\":200,\"body\":\"fader acknowledged\"}".to_string(),
+        ),
+        Err(error) => json_error(502, &error),
+    }
+}
+
+fn proxy_mixer_meters_or_error(
+    params: &HashMap<String, String>,
+    scope: &ServerScope,
+    meter_hub: &MeterHub,
+    timeout: Duration,
+) -> BrowserResponse {
+    let host = match allowed_host(params, scope) {
+        Ok(host) => host,
+        Err(error) => return json_error(400, &error),
+    };
+    let target_entity_id = match DeviceClient::new(&host, timeout)
+        .and_then(|client| client.request("GET", "/datastore", None))
+        .and_then(|response| datastore_entity_id(&response.body))
+    {
+        Ok(entity_id) => entity_id,
+        Err(error) => return json_error(502, &error),
+    };
+    match meter_hub.start_and_snapshot(&host, target_entity_id, timeout) {
+        Ok(snapshot) => json_response(200, mixer_meters_json(&snapshot)),
+        Err(error) => json_error(502, &error),
+    }
+}
+
+fn mixer_meters_json(snapshot: &MixerMeters) -> String {
+    let records = snapshot
+        .records
+        .iter()
+        .map(mixer_meter_record_json)
+        .collect::<Vec<_>>()
+        .join(",");
+    let faders = [
+        ("main_host_11_12", MixerFader::MainHost11To12),
+        ("headphone_host_11_12", MixerFader::HeadphoneHost11To12),
+        ("main_line_in_5_6", MixerFader::MainLineIn5To6),
+    ]
+    .into_iter()
+    .map(|(name, fader)| format!("\"{name}\":{}", mixer_fader_meter_json(snapshot, fader)))
+    .collect::<Vec<_>>()
+    .join(",");
+    let age_ms = snapshot
+        .updated_at
+        .map(|updated_at| updated_at.elapsed().as_millis());
+    format!(
+        "{{\"status\":\"{}\",\"age_ms\":{},\"error\":{},\"faders\":{{{faders}}},\"records\":[{records}]}}",
+        if snapshot.records.is_empty() { "starting" } else { "ok" },
+        age_ms.map_or_else(|| "null".to_string(), |age| age.to_string()),
+        snapshot
+            .error
+            .as_deref()
+            .map_or_else(|| "null".to_string(), |error| format!("\"{}\"", json_escape(error)))
+    )
+}
+
+fn mixer_meter_record_json(record: &MixerMeterRecord) -> String {
+    let values = record
+        .values
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"property_id\":\"{:04x}\",\"index\":{},\"values\":[{values}]}}",
+        record.property_id, record.index
+    )
+}
+
+fn mixer_fader_meter_json(snapshot: &MixerMeters, fader: MixerFader) -> String {
+    let (property_id, index, slot) = fader.meter_slot();
+    snapshot
+        .records
+        .iter()
+        .find(|record| record.property_id == property_id && record.index == index)
+        .and_then(|record| record.values.get(slot).copied())
+        .map_or_else(|| "null".to_string(), |value| value.to_string())
+}
+
+fn datastore_entity_id(body: &str) -> Result<u64, String> {
+    let marker = "\"uid\":\"";
+    let start = body
+        .find(marker)
+        .map(|index| index + marker.len())
+        .ok_or("datastore response did not include a uid")?;
+    let value = body
+        .get(start..start + 16)
+        .ok_or("datastore uid is truncated")?;
+    if !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("datastore uid is invalid".to_string());
+    }
+    u64::from_str_radix(value, 16).map_err(|_| "datastore uid is invalid".to_string())
 }
 
 fn proxy_request(

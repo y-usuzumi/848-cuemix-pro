@@ -76,7 +76,7 @@
       margin-top: 16px;
       align-items: start;
     }
-    .preamp, .outputs { margin-top: 16px; }
+    .preamp, .outputs, .mixing { margin-top: 16px; }
     .preamp-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -88,6 +88,26 @@
       gap: 10px;
     }
     .output-grid .strip { gap: 8px; }
+    .mixer-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .mixer-card { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+    .mixer-card p { margin: 0; color: var(--muted); font-size: 12px; }
+    .mixer-levels { display: flex; gap: 6px; }
+    .mixer-levels button { flex: 1; min-height: 32px; padding: 6px 8px; }
+    .pair-meter { height: 7px; }
+    .pair-meter .meter-lane { display: block; height: 100%; }
+    .meter-lane { overflow: hidden; border-radius: 999px; background: var(--line); }
+    .meter-fill { display: block; width: 0%; height: 100%; background: var(--accent); transition: width 80ms linear; }
+    .meter-feed { margin-top: 10px; color: var(--muted); font-size: 12px; }
+    .meter-feed summary { cursor: pointer; }
+    .meter-mapping-tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 10px; }
+    .meter-mapping-tools button { min-height: 30px; padding: 5px 8px; }
+    .meter-mapping-result { margin: 8px 0 0; padding: 8px; min-height: 0; max-height: 180px; font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .meter-groups { display: grid; gap: 8px; margin-top: 10px; }
+    .meter-group { display: grid; gap: 4px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .meter-values { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 5px; }
+    .meter-channel { display: grid; gap: 2px; min-width: 0; }
+    .meter-channel-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .meter-channel .meter-lane { display: block; height: 6px; }
     .strip {
       min-width: 0;
       display: grid;
@@ -151,6 +171,7 @@
       .toolbar, .grid { grid-template-columns: 1fr; }
       .preamp-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .output-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .mixer-grid { grid-template-columns: 1fr; }
       header { display: block; }
     }
     @media (max-width: 480px) {
@@ -187,6 +208,38 @@
         <button id="loadOutputs" class="secondary">Refresh</button>
       </div>
       <div id="outputOut" class="output-grid"><div class="empty">Loading...</div></div>
+    </section>
+    <section class="mixing">
+      <div class="row">
+        <h2 style="flex: 1">Validated Mixer Faders</h2>
+        <span class="muted">Close CueMix Pro before changing a fader here. Writes are one at a time.</span>
+      </div>
+      <div class="mixer-grid">
+        <article class="mixer-card">
+          <strong>Main 1-2 · Host 11-12</strong>
+          <p>Capture-validated levels only.</p>
+          <div class="mixer-levels"><button data-mix-bus="main-1-2" data-mix-source="host-11-12" data-mix-level="-60" class="secondary">−60 dB</button><button data-mix-bus="main-1-2" data-mix-source="host-11-12" data-mix-level="-12" class="secondary">−12 dB</button></div>
+          <div class="pair-meter" aria-label="Main 1-2 Host 11-12 stereo-pair meter"><span class="meter-lane"><span id="meter-main-host" class="meter-fill"></span></span></div>
+          <div class="strip-status" id="mix-main-host-status" aria-live="polite"></div>
+        </article>
+        <article class="mixer-card">
+          <strong>Headphone Mix · Host 11-12</strong>
+          <p>Capture-validated levels only.</p>
+          <div class="mixer-levels"><button data-mix-bus="headphone-mix" data-mix-source="host-11-12" data-mix-level="-60" class="secondary">−60 dB</button><button data-mix-bus="headphone-mix" data-mix-source="host-11-12" data-mix-level="-12" class="secondary">−12 dB</button></div>
+          <div class="pair-meter" aria-label="Headphone Mix Host 11-12 stereo-pair meter"><span class="meter-lane"><span id="meter-headphone-host" class="meter-fill"></span></span></div>
+          <div class="strip-status" id="mix-headphone-host-status" aria-live="polite"></div>
+        </article>
+        <article class="mixer-card">
+          <strong>Main 1-2 · Line In 5-6</strong>
+          <p>Capture-validated levels only.</p>
+          <div class="mixer-levels"><button data-mix-bus="main-1-2" data-mix-source="line-in-5-6" data-mix-level="-60" class="secondary">−60 dB</button><button data-mix-bus="main-1-2" data-mix-source="line-in-5-6" data-mix-level="-12" class="secondary">−12 dB</button></div>
+          <div class="pair-meter" aria-label="Main 1-2 Line In 5-6 stereo-pair meter"><span class="meter-lane"><span id="meter-main-line" class="meter-fill"></span></span></div>
+          <div class="strip-status" id="mix-main-line-status" aria-live="polite"></div>
+        </article>
+      </div>
+      <details class="meter-feed" id="allMeters"><summary>All captured meter channels (source-labelled where mapped; raw, uncalibrated)</summary><div class="meter-groups" id="meterGroups"></div></details>
+      <div class="meter-mapping-tools"><button id="captureMeterBaseline" class="secondary">Capture meter baseline</button><button id="compareMeterBaseline" class="secondary" disabled>Compare to baseline</button><span class="strip-status" id="meterMappingStatus" aria-live="polite">Read-only mapping helper</span></div>
+      <pre class="meter-mapping-result" id="meterMappingResult">Capture a baseline, introduce one known source or change one fader, then compare. No hardware write is sent by this helper.</pre>
     </section>
     <div class="grid">
       <section>
@@ -439,6 +492,162 @@
         pendingWrites.delete(path);
       }
     }
+    let meterRefreshInFlight = false;
+    let mixInputPairLabels = [];
+    let lastMeterRecords = [];
+    let meterBaseline = null;
+    function meterDb(value) {
+      if (value === null || value === undefined || value === 0xffff) return null;
+      return -value / 256;
+    }
+    function meterPercent(value) {
+      const db = meterDb(value);
+      if (db === null) return 0;
+      return Math.max(0, Math.min(100, ((db + 144) * 100) / 144));
+    }
+    function meterText(value) {
+      const db = meterDb(value);
+      return db === null ? 'Silence / no meter sample' : `${db.toFixed(1)} dBFS (raw ${value})`;
+    }
+    function meterLabel(value) {
+      const db = meterDb(value);
+      return db === null ? '−∞ dBFS' : `${db.toFixed(1)} dBFS`;
+    }
+    function renderPairMeter(prefix, value) {
+      const fill = $(`meter-${prefix}`);
+      if (!fill) return;
+      fill.style.width = `${meterPercent(value)}%`;
+      fill.title = meterText(value);
+    }
+    function meterChannelName(record, slot) {
+      if (record.property_id === '13ad' && record.index === 0) return mixInputPairLabels[slot] || `Mix In pair ${slot + 1}`;
+      if (record.property_id === '138c' && record.index === 0) return `Mic / Inst ${slot * 2 + 1}–${slot * 2 + 2}`;
+      if (record.property_id === '13ad' && (record.index === 32 || record.index === 64) && slot === 6) return 'Mic / Inst 1–2 (mirrored stage)';
+      return `Slot ${slot + 1}`;
+    }
+    function renderAllMeters(records) {
+      if (!$('allMeters').open) return;
+      $('meterGroups').innerHTML = records.map(record => {
+        const title = record.property_id === '13ad' && record.index === 0 ? 'Mix In · 32 stereo pairs (64 channels)' : `0x${record.property_id} · bank ${record.index}`;
+        const channels = record.values.map((value, slot) => {
+          const name = meterChannelName(record, slot);
+          return `<div class="meter-channel" title="${escapeHtml(name)} · ${meterText(value)}"><span class="meter-channel-name">${escapeHtml(name)} · ${meterLabel(value)}</span><span class="meter-lane"><span class="meter-fill" style="width:${meterPercent(value)}%"></span></span></div>`;
+        }).join('');
+        return `<div class="meter-group"><strong>${escapeHtml(title)}</strong><div class="meter-values">${channels}</div></div>`;
+      }).join('');
+    }
+    async function loadMeterLabels() {
+      try {
+        const response = await fetchJson('/api/get?' + qs({ host: $('host').value, path: '/datastore/ext/obank/20' }));
+        const mixIn = JSON.parse(response.body);
+        const sources = Array.from({ length: Number(mixIn.numCh || mixIn.maxCh || 0) }, (_, index) => mixIn[`ch/${index}/src`] || '');
+        const bankIds = [...new Set(sources.map(source => source.split(':')[0]).filter(Boolean))];
+        const bankResponses = await Promise.all(bankIds.map(async bank => {
+          const json = await fetchJson('/api/get?' + qs({ host: $('host').value, path: `/datastore/ext/ibank/${bank}` }));
+          return [bank, JSON.parse(json.body)];
+        }));
+        const banks = new Map(bankResponses);
+        mixInputPairLabels = Array.from({ length: Math.ceil(sources.length / 2) }, (_, slot) => {
+          const [leftBank, leftChannel] = sources[slot * 2].split(':');
+          const [rightBank, rightChannel] = sources[slot * 2 + 1].split(':');
+          const data = banks.get(leftBank);
+          if (!data || leftBank !== rightBank || leftChannel === undefined || rightChannel === undefined) return `Mix In pair ${slot + 1}`;
+          const left = Number(leftChannel) + 1;
+          const right = Number(rightChannel) + 1;
+          return `${data.name || `Bank ${leftBank}`} ${left}–${right}`;
+        });
+        renderAllMeters(lastMeterRecords);
+      } catch (err) {
+        mixInputPairLabels = [];
+      }
+    }
+    function captureMeterBaseline() {
+      if (!lastMeterRecords.length) {
+        setStripStatus($('meterMappingStatus'), 'Waiting for meter data...', 'pending');
+        return;
+      }
+      meterBaseline = lastMeterRecords.map(record => ({
+        property_id: record.property_id,
+        index: record.index,
+        values: [...record.values]
+      }));
+      $('compareMeterBaseline').disabled = false;
+      setStripStatus($('meterMappingStatus'), 'Baseline captured', 'saved');
+      $('meterMappingResult').textContent = 'Now introduce one known source, or change one fader while keeping the source signal steady, then compare.';
+    }
+    function compareMeterBaseline() {
+      if (!meterBaseline) return;
+      const baseline = new Map(meterBaseline.map(record => [`${record.property_id}:${record.index}`, record]));
+      const changes = [];
+      lastMeterRecords.forEach(record => {
+        const previous = baseline.get(`${record.property_id}:${record.index}`);
+        if (!previous) return;
+        record.values.forEach((value, slot) => {
+          const before = previous.values[slot];
+          if (before === undefined || Math.abs(value - before) < 256) return;
+          changes.push({
+            group: `${record.property_id}:${record.index}`,
+            channel: meterChannelName(record, slot),
+            slot,
+            before,
+            value,
+            delta: value - before
+          });
+        });
+      });
+      changes.sort((left, right) => Math.abs(right.delta) - Math.abs(left.delta));
+      const visible = changes.slice(0, 80);
+      $('meterMappingResult').textContent = visible.length
+        ? visible.map(change => `${change.group} · ${change.channel} (slot ${change.slot + 1}): ${meterText(change.before)} → ${meterText(change.value)} (${change.delta >= 0 ? '+' : ''}${change.delta} raw)`).join('\n')
+        : 'No raw meter change of at least 256 was observed. Keep the signal steady, make one larger isolated change, and compare again.';
+      setStripStatus($('meterMappingStatus'), `${changes.length} changed samples`, changes.length ? 'saved' : '');
+    }
+    async function loadMeters() {
+      if (meterRefreshInFlight || document.hidden) return;
+      meterRefreshInFlight = true;
+      try {
+        const meters = await fetchJson('/api/mixer/meters?' + qs({ host: $('host').value }));
+        renderPairMeter('main-host', meters.faders.main_host_11_12);
+        renderPairMeter('headphone-host', meters.faders.headphone_host_11_12);
+        renderPairMeter('main-line', meters.faders.main_line_in_5_6);
+        lastMeterRecords = meters.records || [];
+        renderAllMeters(lastMeterRecords);
+      } catch (err) {
+        // Metering is an optional read-only session; leave the last values in
+        // place while its worker reconnects instead of interrupting controls.
+      } finally {
+        meterRefreshInFlight = false;
+      }
+    }
+    let mixerWritePending = false;
+    const mixerButtons = () => document.querySelectorAll('[data-mix-bus]');
+    const pause = (milliseconds) => new Promise(resolve => setTimeout(resolve, milliseconds));
+    async function writeMixerFader(button) {
+      if (mixerWritePending) return;
+      mixerWritePending = true;
+      const { mixBus: bus, mixSource: source, mixLevel: level } = button.dataset;
+      const status = $(`mix-${bus === 'headphone-mix' ? 'headphone' : 'main'}-${source === 'host-11-12' ? 'host' : 'line'}-status`);
+      setStripStatus(status, 'Opening mixer session...', 'pending');
+      mixerButtons().forEach(item => { item.disabled = true; });
+      try {
+        const json = await fetchJson('/api/mixer/fader', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: qs({ host: $('host').value, bus, source, level, token: sessionToken })
+        });
+        setStripStatus(status, `Set to ${level} dB`, 'saved');
+        show(json.body ?? json);
+      } catch (err) {
+        setStripStatus(status, 'Mixer write failed', 'error');
+        show({ error: err.message });
+      } finally {
+        // The device acknowledges before the just-opened vendor session has
+        // fully settled. Keep the next user action outside that short window.
+        await pause(250);
+        mixerWritePending = false;
+        mixerButtons().forEach(item => { item.disabled = false; });
+      }
+    }
     async function probe() {
       $('probeOut').textContent = 'Probing...';
       try {
@@ -464,6 +673,10 @@
     $('probe').addEventListener('click', probe);
     $('loadPreamps').addEventListener('click', loadPreamps);
     $('loadOutputs').addEventListener('click', loadOutputs);
+    document.querySelectorAll('[data-mix-bus]').forEach(button => button.addEventListener('click', () => writeMixerFader(button)));
+    $('allMeters').addEventListener('toggle', loadMeters);
+    $('captureMeterBaseline').addEventListener('click', captureMeterBaseline);
+    $('compareMeterBaseline').addEventListener('click', compareMeterBaseline);
     $('host').addEventListener('change', () => {
       preampCount = 0;
       outputCount = 0;
@@ -478,14 +691,18 @@
         loadOutputs({ quiet: true });
       }
     }, 750);
+    setInterval(loadMeters, 125);
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) {
         loadPreamps({ quiet: true });
         loadOutputs({ quiet: true });
+        loadMeters();
       }
     });
     loadPreamps();
     loadOutputs();
+    loadMeterLabels();
+    loadMeters();
   </script>
 </body>
 </html>

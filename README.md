@@ -273,6 +273,49 @@ The UI includes live Mic 1-4 controls for preamp name, gain, 48 V, pad, and
 polarity, plus analog output gain controls for outputs 1-12. It also keeps raw
 read, write, and probe controls for the remaining datastore surface.
 
+### Mixer faders
+
+The **Validated Mixer Faders** section is an opt-in AVDECC vendor-control path,
+not a compatibility-datastore write. Close CueMix Pro before using it: concurrent
+controller behavior is not mapped. Each click opens the capture-validated proxy
+session, drains the bounded initial vendor-state exchange, sends one fader
+command, and requires its matching acknowledgement. The browser never sends a
+fader command automatically. It serializes fader clicks and briefly waits after
+an acknowledgement before allowing the next session. If the 848 rejects a
+session anyway, the server retries once using a fresh session and the same
+idempotent requested fader value.
+
+Only these capture-validated controls are available: `Main 1-2 / Host 11-12`,
+`Headphone Mix / Host 11-12`, and `Main 1-2 / Line In 5-6`, at `-12 dB` or
+`-60 dB`. The captured encoding is `00:40:4d:e6` for `-12 dB` and
+`00:00:41:89` for `-60 dB`; do not infer intermediate values, other strips, or
+other buses until they are separately captured.
+
+### Live mixer meters
+
+The mixer page also opens one local, read-only AVDECC meter session while it is
+visible. It uses the capture-observed protocol `00:01:f2:00:00:04`, receives
+its two meter pages, and exposes every packed channel sample through
+`/api/mixer/meters`. The primary `0x13ad:0` record has 32 stereo-pair samples
+for the 64-channel Mix In bank. Its seventh pair is Mic/Inst 1-2; Host 11-12
+is pair 6 and Line In 5-6 is pair 11. A two-sample `0x138c:0` record maps to
+Mic/Inst pairs 1-2 and 3-4. A Mic 1-only tap also maps pair 7 of
+`0x13ad:0x20` and `0x13ad:0x40` to Mic/Inst 1-2, although those two mirrored
+signal stages remain unidentified. A separate Mic 2-only tap changes those
+same four pair samples, confirming that each is a stereo-pair aggregate rather
+than an independent Mic 1 reading. The rest are available under **All captured meter
+channels** by property and vendor bank. The samples encode negative dBFS as a
+big-endian Q8.8 attenuation value: `−raw / 256`; `0xffff` is silence. The UI
+uses a −144 to 0 dBFS visual range and retains the raw value in each meter's
+hover text. A fader write first closes the local meter session, avoiding
+concurrent vendor sessions, and metering resumes on the next page refresh.
+
+The **Capture meter baseline** and **Compare to baseline** helper performs no
+hardware write. Use it to map the remaining vendor groups: capture while a
+known source is quiet, introduce that source alone (or change one fader with a
+steady source), then compare. It lists samples whose raw value changed by at
+least 256, including the vendor property/bank and source name where known.
+
 ## Linux Audio Recovery
 
 The 848 USB playback path is intended to remain at full scale, with monitor
