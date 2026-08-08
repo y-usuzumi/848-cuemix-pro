@@ -111,3 +111,22 @@ fn formats_all_raw_meter_records_and_the_validated_fader_pairs() {
     assert!(json.contains("\"headphone_host_11_12\":5"));
     assert!(json.contains("\"main_line_in_5_6\":10"));
 }
+
+#[test]
+fn formats_discovered_headphone_outputs_with_infinity_and_without_negative_zero() {
+    let json = headphone_outputs_json(&[
+        HeadphoneOutput {
+            channel_indices: [0, 1],
+            attenuation: [0, 0],
+        },
+        HeadphoneOutput {
+            channel_indices: [2, 3],
+            attenuation: [100, 13],
+        },
+    ]);
+    assert!(json.contains("\"number\":1"));
+    assert!(json.contains("\"channel_indices\":[2,3]"));
+    assert!(json.contains("\"trim_db\":[0,0]"));
+    assert!(json.contains("\"trim_db\":[null,-13]"));
+    assert!(!json.contains("-0"));
+}

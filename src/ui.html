@@ -40,14 +40,34 @@
     header { padding: 22px 0 14px; display: flex; align-items: end; justify-content: space-between; gap: 16px; }
     h1 { font-size: 22px; margin: 0; font-weight: 720; }
     .sub { color: var(--muted); margin-top: 4px; }
+    .device-host { width: min(280px, 100%); }
+    .tabs {
+      display: flex;
+      gap: 4px;
+      margin-top: 2px;
+      border-bottom: 1px solid var(--line);
+      overflow-x: auto;
+    }
+    .tab {
+      min-height: 42px;
+      margin-bottom: -1px;
+      border: 0;
+      border-bottom: 3px solid transparent;
+      border-radius: 0;
+      padding: 8px 16px;
+      background: transparent;
+      color: var(--muted);
+    }
+    .tab:hover { color: var(--ink); }
+    .tab[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--ink); }
+    .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+    .tab-panel[hidden] { display: none; }
     .toolbar {
       display: grid;
-      grid-template-columns: minmax(180px, 260px) minmax(220px, 1fr) minmax(110px, 150px) minmax(100px, 120px) auto auto;
+      grid-template-columns: minmax(220px, 1fr) minmax(110px, 150px) minmax(100px, 120px) auto auto;
       gap: 8px;
       align-items: end;
-      padding: 14px 0;
-      border-top: 1px solid var(--line);
-      border-bottom: 1px solid var(--line);
+      padding-bottom: 16px;
     }
     label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
     input, select, button, textarea {
@@ -69,6 +89,7 @@
     }
     button.secondary { background: transparent; color: var(--ink); border-color: var(--line); }
     main { padding-bottom: 28px; }
+    .tab-panel { margin-top: 16px; }
     .grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -76,7 +97,6 @@
       margin-top: 16px;
       align-items: start;
     }
-    .preamp, .outputs, .mixing { margin-top: 16px; }
     .preamp-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -88,6 +108,9 @@
       gap: 10px;
     }
     .output-grid .strip { gap: 8px; }
+    .phone-outputs { margin-top: 22px; padding-top: 12px; border-top: 1px solid var(--line); }
+    .phone-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; max-width: 600px; }
+    .phone-note { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
     .mixer-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
     .mixer-card { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
     .mixer-card p { margin: 0; color: var(--muted); font-size: 12px; }
@@ -140,7 +163,7 @@
     .strip-status.pending, .strip-status.saved { color: var(--accent); }
     .strip-status.error { color: var(--warn); }
     .empty { color: var(--muted); padding: 12px 0; }
-    section {
+    .tab-panel, .grid section {
       min-width: 0;
       border-top: 2px solid var(--line);
       padding-top: 12px;
@@ -172,10 +195,13 @@
       .preamp-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .output-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .mixer-grid { grid-template-columns: 1fr; }
-      header { display: block; }
+      header { align-items: start; }
     }
     @media (max-width: 480px) {
       .preamp-grid, .output-grid { grid-template-columns: 1fr; }
+      header { display: block; }
+      .device-host { margin-top: 12px; }
+      .tab { flex: 1 0 auto; padding-inline: 12px; }
     }
   </style>
 </head>
@@ -185,31 +211,35 @@
       <h1>cuemix-848</h1>
       <div class="sub">Linux control surface for MOTU 848 / CueMix Pro</div>
     </div>
+    <label class="device-host">Device host<input id="host" value="__DEFAULT_HOST__" readonly spellcheck="false"></label>
   </header>
   <main>
-    <div class="toolbar">
-      <label>Device host<input id="host" value="__DEFAULT_HOST__" readonly spellcheck="false"></label>
-      <label>Path<input id="path" value="/datastore/ext/ibank/0" spellcheck="false"></label>
-      <label>Value<input id="value" value="-12" spellcheck="false"></label>
-      <label>Write method<select id="method"><option>POST</option><option>PATCH</option></select></label>
-      <button id="get">Read</button>
-      <button id="set" class="secondary">Write</button>
-    </div>
-    <section class="preamp">
+    <nav class="tabs" role="tablist" aria-label="Control views">
+      <button id="tab-inputs" class="tab" type="button" role="tab" aria-selected="true" aria-controls="panel-inputs" tabindex="0" data-tab="inputs">Inputs</button>
+      <button id="tab-outputs" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-outputs" tabindex="-1" data-tab="outputs">Outputs</button>
+      <button id="tab-mixer" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-mixer" tabindex="-1" data-tab="mixer">Mixer</button>
+      <button id="tab-diagnostics" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-diagnostics" tabindex="-1" data-tab="diagnostics">Diagnostics</button>
+    </nav>
+    <section id="panel-inputs" class="preamp tab-panel" role="tabpanel" aria-labelledby="tab-inputs" tabindex="0">
       <div class="row">
         <h2 style="flex: 1">Mic Preamps</h2>
         <button id="loadPreamps" class="secondary">Refresh</button>
       </div>
       <div id="preampOut" class="preamp-grid"><div class="empty">Loading...</div></div>
     </section>
-    <section class="outputs">
+    <section id="panel-outputs" class="outputs tab-panel" role="tabpanel" aria-labelledby="tab-outputs" tabindex="0" hidden>
       <div class="row">
-        <h2 style="flex: 1">Analog Output Gains</h2>
-        <button id="loadOutputs" class="secondary">Refresh</button>
+        <h2 style="flex: 1">Line Output Gains</h2>
+        <button id="loadOutputs" class="secondary">Refresh All</button>
       </div>
       <div id="outputOut" class="output-grid"><div class="empty">Loading...</div></div>
+      <div class="phone-outputs">
+        <h2>Phones</h2>
+        <div id="phoneOut" class="phone-grid"><div class="empty">Loading...</div></div>
+        <p class="phone-note">Outputs and stereo channel pairs are discovered from the device. Close CueMix Pro before changing gain here.</p>
+      </div>
     </section>
-    <section class="mixing">
+    <section id="panel-mixer" class="mixing tab-panel" role="tabpanel" aria-labelledby="tab-mixer" tabindex="0" hidden>
       <div class="row">
         <h2 style="flex: 1">Validated Mixer Faders</h2>
         <span class="muted">Close CueMix Pro before changing a fader here. Writes are one at a time.</span>
@@ -241,19 +271,29 @@
       <div class="meter-mapping-tools"><button id="captureMeterBaseline" class="secondary">Capture meter baseline</button><button id="compareMeterBaseline" class="secondary" disabled>Compare to baseline</button><span class="strip-status" id="meterMappingStatus" aria-live="polite">Read-only mapping helper</span></div>
       <pre class="meter-mapping-result" id="meterMappingResult">Capture a baseline, introduce one known source or change one fader, then compare. No hardware write is sent by this helper.</pre>
     </section>
-    <div class="grid">
-      <section>
-        <div class="row">
-          <h2 style="flex: 1">Probe</h2>
-          <button id="probe" class="secondary">Run Probe</button>
-        </div>
-        <div id="probeOut"></div>
-      </section>
-      <section>
-        <h2>Response</h2>
-        <pre id="response">Ready.</pre>
-      </section>
-    </div>
+    <section id="panel-diagnostics" class="diagnostics tab-panel" role="tabpanel" aria-labelledby="tab-diagnostics" tabindex="0" hidden>
+      <h2>Datastore</h2>
+      <div class="toolbar">
+        <label>Path<input id="path" value="/datastore/ext/ibank/0" spellcheck="false"></label>
+        <label>Value<input id="value" value="-12" spellcheck="false"></label>
+        <label>Write method<select id="method"><option>POST</option><option>PATCH</option></select></label>
+        <button id="get">Read</button>
+        <button id="set" class="secondary">Write</button>
+      </div>
+      <div class="grid">
+        <section>
+          <div class="row">
+            <h2 style="flex: 1">Probe</h2>
+            <button id="probe" class="secondary">Run Probe</button>
+          </div>
+          <div id="probeOut"></div>
+        </section>
+        <section>
+          <h2>Response</h2>
+          <pre id="response">Ready.</pre>
+        </section>
+      </div>
+    </section>
   </main>
   <script>
     const $ = (id) => document.getElementById(id);
@@ -264,8 +304,36 @@
     const pendingWrites = new Set();
     let preampCount = 0;
     let outputCount = 0;
+    let headphoneCount = 0;
     let preampRefreshInFlight = false;
     let outputRefreshInFlight = false;
+    let headphoneRefreshInFlight = false;
+    let headphoneWritePending = false;
+    const tabs = Array.from(document.querySelectorAll('[role="tab"][data-tab]'));
+    function activateTab(tabName, { updateHash = true, focusTab = false } = {}) {
+      const activeTab = tabs.find(tab => tab.dataset.tab === tabName) || tabs[0];
+      tabs.forEach(tab => {
+        const selected = tab === activeTab;
+        tab.setAttribute('aria-selected', String(selected));
+        tab.tabIndex = selected ? 0 : -1;
+        $(tab.getAttribute('aria-controls')).hidden = !selected;
+      });
+      if (updateHash) history.replaceState(null, '', `#${activeTab.dataset.tab}`);
+      if (focusTab) activeTab.focus();
+      if (activeTab.dataset.tab === 'mixer') loadMeters();
+      if (activeTab.dataset.tab === 'outputs') loadHeadphones({ quiet: headphoneCount > 0 });
+    }
+    function handleTabKeydown(event) {
+      const currentIndex = tabs.indexOf(event.currentTarget);
+      let nextIndex;
+      if (event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+      if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % tabs.length;
+      if (event.key === 'Home') nextIndex = 0;
+      if (event.key === 'End') nextIndex = tabs.length - 1;
+      if (nextIndex === undefined) return;
+      event.preventDefault();
+      activateTab(tabs[nextIndex].dataset.tab, { focusTab: true });
+    }
     const show = (value) => {
       $('response').textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
     };
@@ -446,6 +514,98 @@
       input.value = Number(data[`ch/${index}/trim`] ?? 0);
       $(`out-${index}-gain-value`).textContent = `${input.value} dB`;
     }
+    async function loadHeadphones({ quiet = false } = {}) {
+      if (headphoneRefreshInFlight || headphoneWritePending) return;
+      headphoneRefreshInFlight = true;
+      if (!quiet && !headphoneCount) $('phoneOut').innerHTML = '<div class="empty">Loading...</div>';
+      try {
+        const json = await fetchJson('/api/outputs/headphones?' + qs({ host: $('host').value }));
+        const outputs = Array.isArray(json.outputs) ? json.outputs : [];
+        if (!outputs.length) {
+          headphoneCount = 0;
+          $('phoneOut').innerHTML = '<div class="empty">No headphone outputs advertised by this device.</div>';
+          return;
+        }
+        if (outputs.length !== headphoneCount || !$('phoneOut').querySelector('.strip')) {
+          $('phoneOut').innerHTML = outputs.map((output, index) => headphoneMarkup(index, output)).join('');
+          headphoneCount = outputs.length;
+          outputs.forEach((_, index) => bindHeadphone(index));
+        } else {
+          outputs.forEach((output, index) => syncHeadphone(index, output));
+        }
+      } catch (err) {
+        if (!quiet || !headphoneCount) {
+          $('phoneOut').innerHTML = `<div class="empty">${escapeHtml(err.message)}</div>`;
+          show({ error: err.message });
+        }
+      } finally {
+        headphoneRefreshInFlight = false;
+      }
+    }
+    function headphoneMarkup(index, output) {
+      const left = headphoneSliderValue(output, 0);
+      const right = headphoneSliderValue(output, 1);
+      const label = headphonePairLabel(left, right);
+      return `<article class="strip">
+        <div class="strip-head"><strong>Phones ${index + 1}</strong><output class="gain-value" id="phone-${index}-gain-value">${label}</output></div>
+        <label>Gain<input id="phone-${index}-gain" type="range" min="-100" max="0" step="1" value="${left}" aria-valuetext="${headphoneGainLabel(left)}"></label>
+        <div class="strip-status" id="phone-${index}-status" aria-live="polite"></div>
+      </article>`;
+    }
+    function headphoneSliderValue(output, channel) {
+      const attenuation = Number(output.attenuation?.[channel] ?? 0);
+      return attenuation === 100 ? -100 : -attenuation;
+    }
+    function headphoneGainLabel(value) {
+      return Number(value) === -100 ? '−∞' : `${Number(value)} dB`;
+    }
+    function headphonePairLabel(left, right) {
+      return left === right ? headphoneGainLabel(left) : `L ${headphoneGainLabel(left)} / R ${headphoneGainLabel(right)}`;
+    }
+    function bindHeadphone(index) {
+      const gain = $(`phone-${index}-gain`);
+      const gainValue = $(`phone-${index}-gain-value`);
+      gain.addEventListener('input', () => {
+        const label = headphoneGainLabel(gain.value);
+        gainValue.textContent = label;
+        gain.setAttribute('aria-valuetext', label);
+      });
+      gain.addEventListener('change', () => writeHeadphoneTrim(index, gain.value, $(`phone-${index}-status`)));
+    }
+    function syncHeadphone(index, output) {
+      const input = $(`phone-${index}-gain`);
+      if (!input || document.activeElement === input || input.matches(':active')) return;
+      const left = headphoneSliderValue(output, 0);
+      const right = headphoneSliderValue(output, 1);
+      input.value = left;
+      input.setAttribute('aria-valuetext', headphoneGainLabel(left));
+      $(`phone-${index}-gain-value`).textContent = headphonePairLabel(left, right);
+    }
+    async function writeHeadphoneTrim(index, trimDb, status) {
+      if (headphoneWritePending) return;
+      headphoneWritePending = true;
+      setStripStatus(status, 'Saving...', 'pending');
+      document.querySelectorAll('[id^="phone-"][id$="-gain"]').forEach(input => { input.disabled = true; });
+      try {
+        const json = await fetchJson('/api/outputs/headphone-trim', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: qs({ host: $('host').value, output: index, trim_db: Number(trimDb) === -100 ? '-inf' : trimDb, token: sessionToken })
+        });
+        setStripStatus(status, 'Saved', 'saved');
+        show(json.body ?? json);
+      } catch (err) {
+        setStripStatus(status, 'Save failed', 'error');
+        show({ error: err.message });
+      } finally {
+        headphoneWritePending = false;
+        document.querySelectorAll('[id^="phone-"][id$="-gain"]').forEach(input => { input.disabled = false; });
+      }
+    }
+    function refreshOutputs() {
+      loadOutputs();
+      loadHeadphones();
+    }
     function debounce(callback, delay) {
       let timer = null;
       let pendingArgs;
@@ -603,7 +763,7 @@
       setStripStatus($('meterMappingStatus'), `${changes.length} changed samples`, changes.length ? 'saved' : '');
     }
     async function loadMeters() {
-      if (meterRefreshInFlight || document.hidden) return;
+      if (meterRefreshInFlight || headphoneRefreshInFlight || headphoneWritePending || document.hidden || $('tab-mixer').getAttribute('aria-selected') !== 'true') return;
       meterRefreshInFlight = true;
       try {
         const meters = await fetchJson('/api/mixer/meters?' + qs({ host: $('host').value }));
@@ -672,16 +832,23 @@
     $('set').addEventListener('click', setPath);
     $('probe').addEventListener('click', probe);
     $('loadPreamps').addEventListener('click', loadPreamps);
-    $('loadOutputs').addEventListener('click', loadOutputs);
+    $('loadOutputs').addEventListener('click', refreshOutputs);
     document.querySelectorAll('[data-mix-bus]').forEach(button => button.addEventListener('click', () => writeMixerFader(button)));
     $('allMeters').addEventListener('toggle', loadMeters);
     $('captureMeterBaseline').addEventListener('click', captureMeterBaseline);
     $('compareMeterBaseline').addEventListener('click', compareMeterBaseline);
+    tabs.forEach(tab => {
+      tab.addEventListener('click', () => activateTab(tab.dataset.tab));
+      tab.addEventListener('keydown', handleTabKeydown);
+    });
+    window.addEventListener('hashchange', () => activateTab(window.location.hash.slice(1), { updateHash: false }));
     $('host').addEventListener('change', () => {
       preampCount = 0;
       outputCount = 0;
+      headphoneCount = 0;
       loadPreamps();
       loadOutputs();
+      loadHeadphones();
     });
     // HTTP has no verified push subscription yet, so polling is the recovery
     // path for physical-panel and other-client changes.
@@ -691,16 +858,22 @@
         loadOutputs({ quiet: true });
       }
     }, 750);
+    setInterval(() => {
+      if (!document.hidden && $('tab-outputs').getAttribute('aria-selected') === 'true') loadHeadphones({ quiet: true });
+    }, 5000);
     setInterval(loadMeters, 125);
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) {
         loadPreamps({ quiet: true });
         loadOutputs({ quiet: true });
+        if ($('tab-outputs').getAttribute('aria-selected') === 'true') loadHeadphones({ quiet: true });
         loadMeters();
       }
     });
+    activateTab(window.location.hash.slice(1), { updateHash: false });
     loadPreamps();
     loadOutputs();
+    loadHeadphones();
     loadMeterLabels();
     loadMeters();
   </script>

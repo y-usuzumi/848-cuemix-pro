@@ -7,8 +7,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::avdecc::{
-    set_mixer_fader, start_mixer_meter_worker, MixerFader, MixerLevel, MixerMeterRecord,
-    MixerMeters,
+    read_headphone_outputs, set_headphone_trim, set_mixer_fader, start_mixer_meter_worker,
+    HeadphoneOutput, HeadphoneTrim, MixerFader, MixerLevel, MixerMeterRecord, MixerMeters,
 };
 use crate::device::{datastore_write_request, json_escape, percent_decode, DeviceClient};
 use crate::discovery::{browser_control_hosts, discover_avdecc, DiscoveryResult};
@@ -449,6 +449,10 @@ fn route_browser_request(
             let params = parse_query(query);
             proxy_mixer_meters_or_error(&params, scope, meter_hub, timeout)
         }
+        ("GET", "/api/outputs/headphones") => {
+            let params = parse_query(query);
+            proxy_headphones_or_error(&params, scope, meter_hub, timeout)
+        }
         ("POST", "/api/set") => {
             let mut params = parse_query(query);
             params.extend(parse_query(body));
@@ -464,6 +468,14 @@ fn route_browser_request(
                 return json_error(403, "invalid origin or session token");
             }
             proxy_mixer_fader_or_error(&params, scope, meter_hub, timeout)
+        }
+        ("POST", "/api/outputs/headphone-trim") => {
+            let mut params = parse_query(query);
+            params.extend(parse_query(body));
+            if !is_authorized(origin, params.get("token"), expected_origin, session_token) {
+                return json_error(403, "invalid origin or session token");
+            }
+            proxy_headphone_trim_or_error(&params, scope, meter_hub, timeout)
         }
         _ => BrowserResponse {
             status: 404,
@@ -631,6 +643,114 @@ fn proxy_mixer_meters_or_error(
     match meter_hub.start_and_snapshot(&host, target_entity_id, timeout) {
         Ok(snapshot) => json_response(200, mixer_meters_json(&snapshot)),
         Err(error) => json_error(502, &error),
+    }
+}
+
+fn proxy_headphones_or_error(
+    params: &HashMap<String, String>,
+    scope: &ServerScope,
+    meter_hub: &MeterHub,
+    timeout: Duration,
+) -> BrowserResponse {
+    let (host, target_entity_id) = match headphone_target(params, scope, timeout) {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+    // The meter worker owns a persistent vendor session. Close only that local
+    // session before taking the bounded initial-state snapshot used to discover
+    // headphone outputs and their current trims.
+    if let Err(error) = meter_hub.stop(&host, timeout) {
+        return json_error(502, &error);
+    }
+    match read_headphone_outputs(&host, target_entity_id, timeout) {
+        Ok(outputs) => json_response(200, headphone_outputs_json(&outputs)),
+        Err(error) => json_error(502, &error),
+    }
+}
+
+fn proxy_headphone_trim_or_error(
+    params: &HashMap<String, String>,
+    scope: &ServerScope,
+    meter_hub: &MeterHub,
+    timeout: Duration,
+) -> BrowserResponse {
+    let output_index = match params
+        .get("output")
+        .ok_or("missing headphone output")
+        .and_then(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|_| "headphone output must be a zero-based integer")
+        }) {
+        Ok(index) => index,
+        Err(error) => return json_error(400, error),
+    };
+    let trim = match params
+        .get("trim_db")
+        .ok_or_else(|| "missing headphone trim".to_string())
+        .and_then(|value| HeadphoneTrim::parse(value))
+    {
+        Ok(trim) => trim,
+        Err(error) => return json_error(400, &error),
+    };
+    let (host, target_entity_id) = match headphone_target(params, scope, timeout) {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+    if let Err(error) = meter_hub.stop(&host, timeout) {
+        return json_error(502, &error);
+    }
+    match set_headphone_trim(&host, target_entity_id, output_index, trim, timeout) {
+        Ok(()) => json_response(
+            200,
+            format!(
+                "{{\"status\":200,\"body\":\"Phones {} trim acknowledged\"}}",
+                output_index + 1
+            ),
+        ),
+        Err(error) => json_error(502, &error),
+    }
+}
+
+fn headphone_target(
+    params: &HashMap<String, String>,
+    scope: &ServerScope,
+    timeout: Duration,
+) -> Result<(String, u64), BrowserResponse> {
+    let host = allowed_host(params, scope).map_err(|error| json_error(400, &error))?;
+    let target_entity_id = DeviceClient::new(&host, timeout)
+        .and_then(|client| client.request("GET", "/datastore", None))
+        .and_then(|response| datastore_entity_id(&response.body))
+        .map_err(|error| json_error(502, &error))?;
+    Ok((host, target_entity_id))
+}
+
+fn headphone_outputs_json(outputs: &[HeadphoneOutput]) -> String {
+    let outputs = outputs
+        .iter()
+        .enumerate()
+        .map(|(index, output)| {
+            let left_db = headphone_trim_db_json(output.attenuation[0]);
+            let right_db = headphone_trim_db_json(output.attenuation[1]);
+            format!(
+                "{{\"number\":{},\"channel_indices\":[{},{}],\"attenuation\":[{},{}],\"trim_db\":[{left_db},{right_db}]}}",
+                index + 1,
+                output.channel_indices[0],
+                output.channel_indices[1],
+                output.attenuation[0],
+                output.attenuation[1]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{\"outputs\":[{outputs}]}}")
+}
+
+fn headphone_trim_db_json(attenuation: u8) -> String {
+    if attenuation == 100 {
+        "null".to_string()
+    } else {
+        (-i16::from(attenuation)).to_string()
     }
 }
 

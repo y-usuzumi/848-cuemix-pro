@@ -87,6 +87,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn renders_controls_in_accessible_tab_panels() {
+        let html = render("192.168.4.166", "session-token");
+
+        for (tab, panel) in [
+            ("inputs", "panel-inputs"),
+            ("outputs", "panel-outputs"),
+            ("mixer", "panel-mixer"),
+            ("diagnostics", "panel-diagnostics"),
+        ] {
+            assert!(html.contains(&format!("id=\"tab-{tab}\"")));
+            assert!(html.contains(&format!("aria-controls=\"{panel}\"")));
+            assert!(html.contains(&format!("id=\"{panel}\"")));
+            assert!(html.contains(&format!("aria-labelledby=\"tab-{tab}\"")));
+        }
+
+        let inputs = html
+            .split("id=\"panel-inputs\"")
+            .nth(1)
+            .expect("inputs panel")
+            .split("</section>")
+            .next()
+            .expect("inputs panel contents");
+        assert!(inputs.contains("Mic Preamps"));
+        assert!(!inputs.contains("Analog Output Gains"));
+
+        let outputs = html
+            .split("id=\"panel-outputs\"")
+            .nth(1)
+            .expect("outputs panel")
+            .split("</section>")
+            .next()
+            .expect("outputs panel contents");
+        assert!(outputs.contains("Line Output Gains"));
+        assert!(outputs.contains("Phones"));
+        assert!(outputs.contains("id=\"phoneOut\""));
+        assert!(!outputs.contains("Mic Preamps"));
+    }
+
+    #[test]
     fn renders_discovered_device_links_only_for_usable_control_hosts() {
         let result = DiscoveryResult {
             instance: "848._avdecc._tcp.local".to_string(),

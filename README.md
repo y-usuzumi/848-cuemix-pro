@@ -269,9 +269,48 @@ This is a browser-origin safeguard, not authentication against hostile local
 processes. Anyone with local access to the machine may also be able to reach
 the device's HTTP control service directly.
 
-The UI includes live Mic 1-4 controls for preamp name, gain, 48 V, pad, and
-polarity, plus analog output gain controls for outputs 1-12. It also keeps raw
-read, write, and probe controls for the remaining datastore surface.
+The UI is divided into **Inputs**, **Outputs**, **Mixer**, and **Diagnostics**
+tabs. Inputs contains live Mic 1-4 controls for preamp name, gain, 48 V, pad,
+and polarity. Outputs contains line-output gain controls plus the headphone
+outputs advertised by the connected device. Mixer contains the
+capture-validated faders and read-only meters, while Diagnostics keeps the raw
+read, write, and probe controls for the remaining datastore surface. The
+selected tab is retained in the URL fragment.
+
+### Headphone outputs
+
+Headphone volume is not present in the HTTP compatibility datastore. A bounded,
+read-only initial vendor-state snapshot on the tested 848 instead exposes
+property `0x13b7` as four one-byte values at indices `0` through `3`. With the
+848 front panel reporting Phones 1 at negative infinity and Phones 2 at -50 dB,
+those values are `[100, 100, 50, 50]`: attenuation `100` is the negative-infinity
+sentinel. The 848's static AEM strings independently name four headphone
+channels: `Headphones 1 L/R` and `Headphones 2 L/R`. Property `0x1388` is not
+used for this control: its 12 indexed values match the 848's line outputs, while
+the superficially similar four-value property `0x139d` remains zero at the known
+headphone settings. The installed CueMix Pro binary also models
+`kHeadphoneTrim` separately from `kLineOutTrim` and applies the same output-trim
+conversion to each.
+
+The UI derives its headphone list from the `0x13b7` records rather than a model
+name. It requires an even number of consecutive channel indices and groups each
+pair into one linked-stereo **Phones** control. This produces two controls on the
+848 and is intended to produce two on the 10pre and one on the 16A, matching the
+published hardware inventories in their MOTU user guides. Unsupported devices
+show no phone controls instead of receiving guessed indices.
+
+A user slider change sends both members of only the freshly discovered stereo
+pair through vendor property protocol `00:01:f2:00:00:03`. Each record is
+`13:b7:<u16 index>:01:<attenuation>`, where the one-byte attenuation is the
+positive magnitude of a `-99` through `0` dB value or `100` for negative
+infinity. The UI serializes requests against the local meter session and never
+sends a headphone write automatically. While Outputs is visible, a five-second
+read-only snapshot poll recovers front-panel or other-controller changes until
+the vendor notification lifecycle is implemented. Close CueMix Pro before
+changing a headphone gain: concurrent external-controller behavior has not been
+mapped. The exact `0x13b7` write is not exercised by automated verification; its
+record envelope and attenuation conversion are derived from the installed
+CueMix model and generation-compatible output-trim traffic.
 
 ### Mixer faders
 

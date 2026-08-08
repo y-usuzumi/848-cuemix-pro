@@ -139,6 +139,129 @@ fn restricts_mixer_faders_to_capture_validated_routes_and_levels() {
 }
 
 #[test]
+fn discovers_headphone_pairs_from_vendor_state_without_line_output_confusion() {
+    let state = parse_vendor_state_records(&[
+        0x13, 0x88, 0x00, 0x00, 0x01, 0x06, // line-output trim: ignored
+        0x13, 0x9d, 0x00, 0x00, 0x01, 0x00, // unrelated four-channel state
+        0x13, 0xb7, 0x00, 0x00, 0x01, 0x64, // Phones 1 L: -infinity
+        0x13, 0xb7, 0x00, 0x01, 0x01, 0x64, // Phones 1 R: -infinity
+        0x13, 0xb7, 0x00, 0x02, 0x01, 0x32, // Phones 2 L: -50 dB
+        0x13, 0xb7, 0x00, 0x03, 0x01, 0x32, // Phones 2 R: -50 dB
+    ])
+    .unwrap();
+    assert_eq!(
+        headphone_outputs_from_state(&state).unwrap(),
+        vec![
+            HeadphoneOutput {
+                channel_indices: [0, 1],
+                attenuation: [100, 100],
+            },
+            HeadphoneOutput {
+                channel_indices: [2, 3],
+                attenuation: [50, 50],
+            },
+        ]
+    );
+}
+
+#[test]
+fn discovers_single_phone_interfaces_and_rejects_wrapped_channel_pairs() {
+    let single = vec![
+        VendorStateRecord {
+            property_id: HEADPHONE_TRIM_PROPERTY,
+            property_index: 8,
+            value: vec![6],
+        },
+        VendorStateRecord {
+            property_id: HEADPHONE_TRIM_PROPERTY,
+            property_index: 9,
+            value: vec![6],
+        },
+    ];
+    assert_eq!(
+        headphone_outputs_from_state(&single).unwrap(),
+        vec![HeadphoneOutput {
+            channel_indices: [8, 9],
+            attenuation: [6, 6],
+        }]
+    );
+
+    let wrapped = vec![
+        VendorStateRecord {
+            property_id: HEADPHONE_TRIM_PROPERTY,
+            property_index: 0,
+            value: vec![6],
+        },
+        VendorStateRecord {
+            property_id: HEADPHONE_TRIM_PROPERTY,
+            property_index: u16::MAX,
+            value: vec![6],
+        },
+    ];
+    assert!(headphone_outputs_from_state(&wrapped).is_err());
+}
+
+#[test]
+fn encodes_one_linked_stereo_headphone_trim_and_rejects_unsafe_state() {
+    let output = HeadphoneOutput {
+        channel_indices: [2, 3],
+        attenuation: [0, 0],
+    };
+    assert_eq!(
+        headphone_trim_payload(&output, HeadphoneTrim::Decibels(-50)),
+        vec![0x13, 0xb7, 0x00, 0x02, 0x01, 0x32, 0x13, 0xb7, 0x00, 0x03, 0x01, 0x32,]
+    );
+    assert_eq!(
+        headphone_trim_payload(&output, HeadphoneTrim::NegativeInfinity),
+        vec![0x13, 0xb7, 0x00, 0x02, 0x01, 0x64, 0x13, 0xb7, 0x00, 0x03, 0x01, 0x64,]
+    );
+    assert_eq!(
+        HeadphoneTrim::parse("-inf").unwrap(),
+        HeadphoneTrim::NegativeInfinity
+    );
+    assert_eq!(
+        HeadphoneTrim::parse("-50").unwrap(),
+        HeadphoneTrim::Decibels(-50)
+    );
+    assert!(HeadphoneTrim::parse("-100").is_err());
+
+    let incomplete = vec![VendorStateRecord {
+        property_id: HEADPHONE_TRIM_PROPERTY,
+        property_index: 0,
+        value: vec![12],
+    }];
+    assert!(headphone_outputs_from_state(&incomplete).is_err());
+
+    let nonconsecutive = vec![
+        VendorStateRecord {
+            property_id: HEADPHONE_TRIM_PROPERTY,
+            property_index: 0,
+            value: vec![12],
+        },
+        VendorStateRecord {
+            property_id: HEADPHONE_TRIM_PROPERTY,
+            property_index: 2,
+            value: vec![12],
+        },
+    ];
+    assert!(headphone_outputs_from_state(&nonconsecutive).is_err());
+
+    let invalid_attenuation = vec![
+        VendorStateRecord {
+            property_id: HEADPHONE_TRIM_PROPERTY,
+            property_index: 0,
+            value: vec![101],
+        },
+        VendorStateRecord {
+            property_id: HEADPHONE_TRIM_PROPERTY,
+            property_index: 1,
+            value: vec![101],
+        },
+    ];
+    assert!(headphone_outputs_from_state(&invalid_attenuation).is_err());
+}
+
+#[test]
 fn derives_the_proxy_ethernet_address_from_an_entity_id() {
     assert_eq!(
         ethernet_address_from_entity_id(0x0001_f2ff_fefe_b9e2),

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{mpsc, Arc, Mutex};
@@ -52,6 +53,48 @@ pub(crate) struct MixerMeterRecord {
     pub(crate) property_id: u16,
     pub(crate) index: u8,
     pub(crate) values: Vec<u16>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HeadphoneOutput {
+    pub(crate) channel_indices: [u16; 2],
+    pub(crate) attenuation: [u8; 2],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeadphoneTrim {
+    NegativeInfinity,
+    Decibels(i16),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VendorStateRecord {
+    property_id: u16,
+    property_index: u16,
+    value: Vec<u8>,
+}
+
+const HEADPHONE_TRIM_PROPERTY: u16 = 0x13b7;
+
+impl HeadphoneTrim {
+    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+        if value == "-inf" {
+            return Ok(Self::NegativeInfinity);
+        }
+        match value.parse::<i16>() {
+            Ok(decibels) if (-99..=0).contains(&decibels) => Ok(Self::Decibels(decibels)),
+            _ => Err("headphone trim must be -inf or an integer between -99 and 0 dB".to_string()),
+        }
+    }
+
+    fn attenuation(self) -> u8 {
+        match self {
+            Self::NegativeInfinity => 100,
+            Self::Decibels(decibels) => {
+                u8::try_from(-decibels).expect("validated headphone dB fits in one byte")
+            }
+        }
+    }
 }
 
 impl MixerFader {
@@ -145,7 +188,7 @@ fn set_mixer_fader_once(
         .request_entity_id(CUE_MIX_PROXY_ADDRESS, timeout)?
         .entity_id
         .ok_or("AVDECC Proxy did not return a controller identity")?;
-    let next_sequence =
+    let (next_sequence, _) =
         proxy.start_vendor_state(target_entity_id, controller_entity_id, timeout)?;
     let (property, index) = fader.property_and_index();
     let mut data = Vec::with_capacity(9);
@@ -162,6 +205,133 @@ fn set_mixer_fader_once(
         timeout,
     )?;
     Ok(())
+}
+
+/// Reads the headphone inventory and current trims from the same bounded
+/// initial vendor-state snapshot CueMix Pro uses. Unlike the HTTP output-bank
+/// collection, this discovers one or two stereo phone outputs without assuming
+/// a particular interface model or hard-coding its channel indices.
+pub(crate) fn read_headphone_outputs(
+    host: &str,
+    target_entity_id: u64,
+    timeout: Duration,
+) -> Result<Vec<HeadphoneOutput>, String> {
+    const CUE_MIX_PROXY_ADDRESS: [u8; 6] = [0x01, 0x00, 0x00, 0x00, 0x01, 0x00];
+    let mut proxy = AvdeccProxy::connect(host, "/", timeout)?;
+    let controller_entity_id = proxy
+        .request_entity_id(CUE_MIX_PROXY_ADDRESS, timeout)?
+        .entity_id
+        .ok_or("AVDECC Proxy did not return a controller identity")?;
+    let (_, state) = proxy.start_vendor_state(target_entity_id, controller_entity_id, timeout)?;
+    headphone_outputs_from_state(&state)
+}
+
+/// Sends one explicitly requested linked-stereo headphone trim. The property
+/// is advertised by the device and identified by CueMix Pro's kHeadphoneTrim
+/// model; the record envelope and one-byte attenuation follow the same
+/// generation-compatible output-trim protocol. Channel indices are accepted
+/// only when freshly discovered from the target itself.
+pub(crate) fn set_headphone_trim(
+    host: &str,
+    target_entity_id: u64,
+    output_index: usize,
+    trim: HeadphoneTrim,
+    timeout: Duration,
+) -> Result<(), String> {
+    const RETRY_DELAY: Duration = Duration::from_millis(150);
+    match set_headphone_trim_once(host, target_entity_id, output_index, trim, timeout) {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            thread::sleep(RETRY_DELAY);
+            set_headphone_trim_once(host, target_entity_id, output_index, trim, timeout)
+                .map_err(|retry_error| {
+                    format!(
+                        "headphone trim write failed after one fresh-session retry; first attempt: {first_error}; retry: {retry_error}"
+                    )
+                })
+        }
+    }
+}
+
+fn set_headphone_trim_once(
+    host: &str,
+    target_entity_id: u64,
+    output_index: usize,
+    trim: HeadphoneTrim,
+    timeout: Duration,
+) -> Result<(), String> {
+    const CUE_MIX_PROXY_ADDRESS: [u8; 6] = [0x01, 0x00, 0x00, 0x00, 0x01, 0x00];
+    const PROPERTY_WRITE_PROTOCOL: [u8; 6] = [0x00, 0x01, 0xf2, 0x00, 0x00, 0x03];
+    let mut proxy = AvdeccProxy::connect(host, "/", timeout)?;
+    let controller_entity_id = proxy
+        .request_entity_id(CUE_MIX_PROXY_ADDRESS, timeout)?
+        .entity_id
+        .ok_or("AVDECC Proxy did not return a controller identity")?;
+    let (next_sequence, state) =
+        proxy.start_vendor_state(target_entity_id, controller_entity_id, timeout)?;
+    let outputs = headphone_outputs_from_state(&state)?;
+    let output = outputs
+        .get(output_index)
+        .ok_or("that headphone output was not advertised by the device")?;
+    let data = headphone_trim_payload(output, trim);
+    proxy.vendor_request(
+        target_entity_id,
+        controller_entity_id,
+        next_sequence,
+        PROPERTY_WRITE_PROTOCOL,
+        &data,
+        timeout,
+    )?;
+    Ok(())
+}
+
+fn headphone_trim_payload(output: &HeadphoneOutput, trim: HeadphoneTrim) -> Vec<u8> {
+    let attenuation = trim.attenuation();
+    let mut data = Vec::with_capacity(12);
+    for channel_index in output.channel_indices {
+        data.extend_from_slice(&HEADPHONE_TRIM_PROPERTY.to_be_bytes());
+        data.extend_from_slice(&channel_index.to_be_bytes());
+        data.push(1);
+        data.push(attenuation);
+    }
+    data
+}
+
+fn headphone_outputs_from_state(
+    state: &[VendorStateRecord],
+) -> Result<Vec<HeadphoneOutput>, String> {
+    let channels = state
+        .iter()
+        .filter(|record| record.property_id == HEADPHONE_TRIM_PROPERTY)
+        .map(|record| {
+            let [attenuation] = record.value.as_slice() else {
+                return Err("headphone trim state has an unexpected value size".to_string());
+            };
+            if *attenuation > 100 {
+                return Err("headphone trim state has an invalid attenuation".to_string());
+            }
+            Ok((record.property_index, *attenuation))
+        })
+        .collect::<Result<BTreeMap<_, _>, String>>()?;
+    if !channels.len().is_multiple_of(2) {
+        return Err("device advertised an incomplete stereo headphone output".to_string());
+    }
+    let channels = channels.into_iter().collect::<Vec<_>>();
+    channels
+        .chunks_exact(2)
+        .map(|pair| {
+            let [(left_index, left_attenuation), (right_index, right_attenuation)] = pair else {
+                unreachable!("chunks_exact always returns stereo pairs");
+            };
+            if right_index.checked_sub(*left_index) != Some(1) {
+                return Err("headphone trim channels are not a consecutive stereo pair".to_string());
+            }
+            Ok(HeadphoneOutput {
+                channel_indices: [*left_index, *right_index],
+                attenuation: [*left_attenuation, *right_attenuation],
+            })
+        })
+        .collect()
 }
 
 /// Starts the capture-validated read-only meter lifecycle on a dedicated
@@ -254,7 +424,7 @@ impl MixerMeterSession {
             .request_entity_id(CUE_MIX_PROXY_ADDRESS, timeout)?
             .entity_id
             .ok_or("AVDECC Proxy did not return a controller identity")?;
-        let next_sequence =
+        let (next_sequence, _) =
             proxy.start_vendor_state(target_entity_id, controller_entity_id, timeout)?;
         Ok(Self {
             proxy,
@@ -332,6 +502,32 @@ fn parse_mixer_meter_page(data: &[u8]) -> Result<Vec<MixerMeterRecord>, String> 
             property_id,
             index,
             values,
+        });
+    }
+    Ok(records)
+}
+
+fn parse_vendor_state_records(data: &[u8]) -> Result<Vec<VendorStateRecord>, String> {
+    const HEADER_LEN: usize = 5;
+    let mut cursor = 0usize;
+    let mut records = Vec::new();
+    while cursor < data.len() {
+        let header = data
+            .get(cursor..cursor + HEADER_LEN)
+            .ok_or("truncated CueMix vendor-state record header")?;
+        let property_id = u16::from_be_bytes([header[0], header[1]]);
+        let property_index = u16::from_be_bytes([header[2], header[3]]);
+        let value_len = usize::from(header[4]);
+        cursor += HEADER_LEN;
+        let value = data
+            .get(cursor..cursor + value_len)
+            .ok_or("truncated CueMix vendor-state record value")?
+            .to_vec();
+        cursor += value_len;
+        records.push(VendorStateRecord {
+            property_id,
+            property_index,
+            value,
         });
     }
     Ok(records)
@@ -554,11 +750,12 @@ impl AvdeccProxy {
         target_entity_id: u64,
         controller_entity_id: u64,
         timeout: Duration,
-    ) -> Result<u16, String> {
+    ) -> Result<(u16, Vec<VendorStateRecord>), String> {
         const VENDOR_STATE_PROTOCOL: [u8; 6] = [0x00, 0x01, 0xf2, 0x00, 0x00, 0x01];
         const MAX_INITIAL_STATE_PAGES: usize = 256;
 
         let mut sequence = 1u16;
+        let mut records = Vec::new();
         let mut response = self.vendor_request(
             target_entity_id,
             controller_entity_id,
@@ -576,8 +773,9 @@ impl AvdeccProxy {
                 VENDOR_STATE_PROTOCOL,
             )?;
             if state.is_empty() {
-                return Ok(sequence.wrapping_add(1));
+                return Ok((sequence.wrapping_add(1), records));
             }
+            records.extend(parse_vendor_state_records(state)?);
             let previous_sequence = sequence;
             sequence = sequence.wrapping_add(1);
             response = self.vendor_request(
