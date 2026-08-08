@@ -139,9 +139,10 @@ fn restricts_mixer_faders_to_capture_validated_routes_and_levels() {
 }
 
 #[test]
-fn discovers_headphone_pairs_from_vendor_state_without_line_output_confusion() {
+fn discovers_line_and_headphone_outputs_from_their_distinct_vendor_properties() {
     let state = parse_vendor_state_records(&[
-        0x13, 0x88, 0x00, 0x00, 0x01, 0x06, // line-output trim: ignored
+        0x13, 0x88, 0x00, 0x00, 0x01, 0x23, // Line Out 1: -35 dB
+        0x13, 0x88, 0x00, 0x03, 0x01, 0x2a, // Line Out 4: -42 dB
         0x13, 0x9d, 0x00, 0x00, 0x01, 0x00, // unrelated four-channel state
         0x13, 0xb7, 0x00, 0x00, 0x01, 0x64, // Phones 1 L: -infinity
         0x13, 0xb7, 0x00, 0x01, 0x01, 0x64, // Phones 1 R: -infinity
@@ -149,6 +150,19 @@ fn discovers_headphone_pairs_from_vendor_state_without_line_output_confusion() {
         0x13, 0xb7, 0x00, 0x03, 0x01, 0x32, // Phones 2 R: -50 dB
     ])
     .unwrap();
+    assert_eq!(
+        line_outputs_from_state(&state).unwrap(),
+        vec![
+            LineOutput {
+                channel_index: 0,
+                attenuation: 35,
+            },
+            LineOutput {
+                channel_index: 3,
+                attenuation: 42,
+            },
+        ]
+    );
     assert_eq!(
         headphone_outputs_from_state(&state).unwrap(),
         vec![
@@ -208,22 +222,31 @@ fn encodes_one_linked_stereo_headphone_trim_and_rejects_unsafe_state() {
         attenuation: [0, 0],
     };
     assert_eq!(
-        headphone_trim_payload(&output, HeadphoneTrim::Decibels(-50)),
+        output_trim_payload(
+            HEADPHONE_TRIM_PROPERTY,
+            &output.channel_indices,
+            OutputTrim::Decibels(-50)
+        ),
         vec![0x13, 0xb7, 0x00, 0x02, 0x01, 0x32, 0x13, 0xb7, 0x00, 0x03, 0x01, 0x32,]
     );
     assert_eq!(
-        headphone_trim_payload(&output, HeadphoneTrim::NegativeInfinity),
+        output_trim_payload(
+            HEADPHONE_TRIM_PROPERTY,
+            &output.channel_indices,
+            OutputTrim::NegativeInfinity
+        ),
         vec![0x13, 0xb7, 0x00, 0x02, 0x01, 0x64, 0x13, 0xb7, 0x00, 0x03, 0x01, 0x64,]
     );
     assert_eq!(
-        HeadphoneTrim::parse("-inf").unwrap(),
-        HeadphoneTrim::NegativeInfinity
+        output_trim_payload(LINE_OUTPUT_TRIM_PROPERTY, &[3], OutputTrim::Decibels(-42)),
+        vec![0x13, 0x88, 0x00, 0x03, 0x01, 0x2a]
     );
     assert_eq!(
-        HeadphoneTrim::parse("-50").unwrap(),
-        HeadphoneTrim::Decibels(-50)
+        OutputTrim::parse("-inf").unwrap(),
+        OutputTrim::NegativeInfinity
     );
-    assert!(HeadphoneTrim::parse("-100").is_err());
+    assert_eq!(OutputTrim::parse("-50").unwrap(), OutputTrim::Decibels(-50));
+    assert!(OutputTrim::parse("-100").is_err());
 
     let incomplete = vec![VendorStateRecord {
         property_id: HEADPHONE_TRIM_PROPERTY,

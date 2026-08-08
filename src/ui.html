@@ -299,7 +299,6 @@
     const $ = (id) => document.getElementById(id);
     const qs = (params) => new URLSearchParams(params).toString();
     const preampPath = '/datastore/ext/ibank/0';
-    const outputPath = '/datastore/ext/obank/0';
     const sessionToken = '__SESSION_TOKEN__';
     const pendingWrites = new Set();
     let preampCount = 0;
@@ -307,7 +306,7 @@
     let headphoneCount = 0;
     let preampRefreshInFlight = false;
     let outputRefreshInFlight = false;
-    let headphoneRefreshInFlight = false;
+    let outputWritePending = false;
     let headphoneWritePending = false;
     const tabs = Array.from(document.querySelectorAll('[role="tab"][data-tab]'));
     function activateTab(tabName, { updateHash = true, focusTab = false } = {}) {
@@ -321,7 +320,7 @@
       if (updateHash) history.replaceState(null, '', `#${activeTab.dataset.tab}`);
       if (focusTab) activeTab.focus();
       if (activeTab.dataset.tab === 'mixer') loadMeters();
-      if (activeTab.dataset.tab === 'outputs') loadHeadphones({ quiet: headphoneCount > 0 });
+      if (activeTab.dataset.tab === 'outputs') loadOutputs({ quiet: outputCount > 0 || headphoneCount > 0 });
     }
     function handleTabKeydown(event) {
       const currentIndex = tabs.indexOf(event.currentTarget);
@@ -456,90 +455,98 @@
       }
     }
     async function loadOutputs({ quiet = false } = {}) {
-      if (outputRefreshInFlight) return;
+      if (outputRefreshInFlight || outputWritePending || headphoneWritePending) return;
       outputRefreshInFlight = true;
       if (!quiet && !outputCount) $('outputOut').innerHTML = '<div class="empty">Loading...</div>';
+      if (!quiet && !headphoneCount) $('phoneOut').innerHTML = '<div class="empty">Loading...</div>';
       try {
-        const json = await fetchJson('/api/get?' + qs({ host: $('host').value, path: outputPath }));
-        const data = JSON.parse(json.body);
-        const count = Math.min(12, Number(data.maxCh || 0));
-        if (!count) throw new Error('No analog output gains exposed by this device.');
-        if (count !== outputCount || !$('outputOut').querySelector('.strip')) {
-          $('outputOut').innerHTML = Array.from({ length: count }, (_, index) => outputMarkup(index, data)).join('');
-          outputCount = count;
-          for (let index = 0; index < count; index += 1) bindOutput(index);
+        const json = await fetchJson('/api/outputs?' + qs({ host: $('host').value }));
+        const lineOutputs = Array.isArray(json.line_outputs) ? json.line_outputs : [];
+        const headphoneOutputs = Array.isArray(json.headphone_outputs) ? json.headphone_outputs : [];
+        if (lineOutputs.length) {
+          if (lineOutputs.length !== outputCount || !$('outputOut').querySelector('.strip')) {
+            $('outputOut').innerHTML = lineOutputs.map((output, index) => outputMarkup(index, output)).join('');
+            outputCount = lineOutputs.length;
+            lineOutputs.forEach((_, index) => bindOutput(index));
+          } else {
+            lineOutputs.forEach((output, index) => syncOutput(index, output));
+          }
         } else {
-          for (let index = 0; index < count; index += 1) syncOutput(index, data);
+          outputCount = 0;
+          $('outputOut').innerHTML = '<div class="empty">No line-output trims advertised by this device.</div>';
+        }
+        if (headphoneOutputs.length) {
+          if (headphoneOutputs.length !== headphoneCount || !$('phoneOut').querySelector('.strip')) {
+            $('phoneOut').innerHTML = headphoneOutputs.map((output, index) => headphoneMarkup(index, output)).join('');
+            headphoneCount = headphoneOutputs.length;
+            headphoneOutputs.forEach((_, index) => bindHeadphone(index));
+          } else {
+            headphoneOutputs.forEach((output, index) => syncHeadphone(index, output));
+          }
+        } else {
+          headphoneCount = 0;
+          $('phoneOut').innerHTML = '<div class="empty">No headphone outputs advertised by this device.</div>';
         }
       } catch (err) {
         if (!quiet || !outputCount) {
           $('outputOut').innerHTML = `<div class="empty">${escapeHtml(err.message)}</div>`;
-          show({ error: err.message });
         }
+        if (!quiet || !headphoneCount) {
+          $('phoneOut').innerHTML = `<div class="empty">${escapeHtml(err.message)}</div>`;
+        }
+        show({ error: err.message });
       } finally {
         outputRefreshInFlight = false;
       }
     }
-    function outputMarkup(index, data) {
-      const key = (field) => `ch/${index}/${field}`;
-      const gain = Number(data[key('trim')] ?? 0);
-      const range = String(data[key('trimRange')] || '-99:0').split(':').map(Number);
-      const min = Number.isFinite(range[0]) ? range[0] : -99;
-      const max = Number.isFinite(range[1]) ? range[1] : 0;
+    function outputMarkup(index, output) {
+      const gain = outputSliderValue(output.attenuation);
+      const label = outputGainLabel(gain);
       return `<article class="strip">
-        <div class="strip-head"><strong>Out ${index + 1}</strong><output class="gain-value" id="out-${index}-gain-value">${gain} dB</output></div>
-        <label>Gain<input id="out-${index}-gain" type="range" min="${min}" max="${max}" step="1" value="${gain}"></label>
+        <div class="strip-head"><strong>Line Out ${Number(output.number ?? index + 1)}</strong><output class="gain-value" id="out-${index}-gain-value">${label}</output></div>
+        <label>Gain<input id="out-${index}-gain" type="range" min="-100" max="0" step="1" value="${gain}" aria-valuetext="${label}"></label>
         <div class="strip-status" id="out-${index}-status" aria-live="polite"></div>
       </article>`;
     }
-    function outputFieldPath(index, field) {
-      return `${outputPath}/ch/${index}/${field}`;
-    }
     function bindOutput(index) {
-      const path = (field) => outputFieldPath(index, field);
       const gain = $(`out-${index}-gain`);
       const gainValue = $(`out-${index}-gain-value`);
-      const status = $(`out-${index}-status`);
-      const saveGain = debounce((value) => writeDatastore(path('trim'), value, status), 180);
       gain.addEventListener('input', () => {
-        gainValue.textContent = `${gain.value} dB`;
-        saveGain(gain.value);
+        const label = outputGainLabel(gain.value);
+        gainValue.textContent = label;
+        gain.setAttribute('aria-valuetext', label);
       });
-      gain.addEventListener('change', () => saveGain.flush(gain.value));
+      gain.addEventListener('change', () => writeLineOutputTrim(index, gain.value, $(`out-${index}-status`)));
     }
-    function syncOutput(index, data) {
-      const path = outputFieldPath(index, 'trim');
+    function syncOutput(index, output) {
       const input = $(`out-${index}-gain`);
-      if (!input || !canSyncField(input, path)) return;
-      input.value = Number(data[`ch/${index}/trim`] ?? 0);
-      $(`out-${index}-gain-value`).textContent = `${input.value} dB`;
+      if (!input || document.activeElement === input || input.matches(':active')) return;
+      const gain = outputSliderValue(output.attenuation);
+      const label = outputGainLabel(gain);
+      input.value = gain;
+      input.setAttribute('aria-valuetext', label);
+      $(`out-${index}-gain-value`).textContent = label;
     }
-    async function loadHeadphones({ quiet = false } = {}) {
-      if (headphoneRefreshInFlight || headphoneWritePending) return;
-      headphoneRefreshInFlight = true;
-      if (!quiet && !headphoneCount) $('phoneOut').innerHTML = '<div class="empty">Loading...</div>';
+    async function writeLineOutputTrim(index, trimDb, status) {
+      if (outputWritePending || headphoneWritePending) return;
+      outputWritePending = true;
+      setStripStatus(status, 'Saving...', 'pending');
+      document.querySelectorAll('[id^="out-"][id$="-gain"]').forEach(input => { input.disabled = true; });
       try {
-        const json = await fetchJson('/api/outputs/headphones?' + qs({ host: $('host').value }));
-        const outputs = Array.isArray(json.outputs) ? json.outputs : [];
-        if (!outputs.length) {
-          headphoneCount = 0;
-          $('phoneOut').innerHTML = '<div class="empty">No headphone outputs advertised by this device.</div>';
-          return;
-        }
-        if (outputs.length !== headphoneCount || !$('phoneOut').querySelector('.strip')) {
-          $('phoneOut').innerHTML = outputs.map((output, index) => headphoneMarkup(index, output)).join('');
-          headphoneCount = outputs.length;
-          outputs.forEach((_, index) => bindHeadphone(index));
-        } else {
-          outputs.forEach((output, index) => syncHeadphone(index, output));
-        }
+        const json = await fetchJson('/api/outputs/line-trim', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: qs({ host: $('host').value, output: index, trim_db: Number(trimDb) === -100 ? '-inf' : trimDb, token: sessionToken })
+        });
+        setStripStatus(status, 'Saved', 'saved');
+        show(json.body ?? json);
       } catch (err) {
-        if (!quiet || !headphoneCount) {
-          $('phoneOut').innerHTML = `<div class="empty">${escapeHtml(err.message)}</div>`;
-          show({ error: err.message });
-        }
+        setStripStatus(status, 'Save failed', 'error');
+        show({ error: err.message });
       } finally {
-        headphoneRefreshInFlight = false;
+        outputWritePending = false;
+        document.querySelectorAll('[id^="out-"][id$="-gain"]').forEach(input => { input.disabled = false; });
+        loadOutputs({ quiet: true });
       }
     }
     function headphoneMarkup(index, output) {
@@ -548,25 +555,28 @@
       const label = headphonePairLabel(left, right);
       return `<article class="strip">
         <div class="strip-head"><strong>Phones ${index + 1}</strong><output class="gain-value" id="phone-${index}-gain-value">${label}</output></div>
-        <label>Gain<input id="phone-${index}-gain" type="range" min="-100" max="0" step="1" value="${left}" aria-valuetext="${headphoneGainLabel(left)}"></label>
+        <label>Gain<input id="phone-${index}-gain" type="range" min="-100" max="0" step="1" value="${left}" aria-valuetext="${outputGainLabel(left)}"></label>
         <div class="strip-status" id="phone-${index}-status" aria-live="polite"></div>
       </article>`;
     }
-    function headphoneSliderValue(output, channel) {
-      const attenuation = Number(output.attenuation?.[channel] ?? 0);
-      return attenuation === 100 ? -100 : -attenuation;
+    function outputSliderValue(attenuation) {
+      const value = Number(attenuation ?? 0);
+      return value === 100 ? -100 : -value;
     }
-    function headphoneGainLabel(value) {
+    function headphoneSliderValue(output, channel) {
+      return outputSliderValue(output.attenuation?.[channel]);
+    }
+    function outputGainLabel(value) {
       return Number(value) === -100 ? '−∞' : `${Number(value)} dB`;
     }
     function headphonePairLabel(left, right) {
-      return left === right ? headphoneGainLabel(left) : `L ${headphoneGainLabel(left)} / R ${headphoneGainLabel(right)}`;
+      return left === right ? outputGainLabel(left) : `L ${outputGainLabel(left)} / R ${outputGainLabel(right)}`;
     }
     function bindHeadphone(index) {
       const gain = $(`phone-${index}-gain`);
       const gainValue = $(`phone-${index}-gain-value`);
       gain.addEventListener('input', () => {
-        const label = headphoneGainLabel(gain.value);
+        const label = outputGainLabel(gain.value);
         gainValue.textContent = label;
         gain.setAttribute('aria-valuetext', label);
       });
@@ -578,11 +588,11 @@
       const left = headphoneSliderValue(output, 0);
       const right = headphoneSliderValue(output, 1);
       input.value = left;
-      input.setAttribute('aria-valuetext', headphoneGainLabel(left));
+      input.setAttribute('aria-valuetext', outputGainLabel(left));
       $(`phone-${index}-gain-value`).textContent = headphonePairLabel(left, right);
     }
     async function writeHeadphoneTrim(index, trimDb, status) {
-      if (headphoneWritePending) return;
+      if (headphoneWritePending || outputWritePending) return;
       headphoneWritePending = true;
       setStripStatus(status, 'Saving...', 'pending');
       document.querySelectorAll('[id^="phone-"][id$="-gain"]').forEach(input => { input.disabled = true; });
@@ -600,11 +610,8 @@
       } finally {
         headphoneWritePending = false;
         document.querySelectorAll('[id^="phone-"][id$="-gain"]').forEach(input => { input.disabled = false; });
+        loadOutputs({ quiet: true });
       }
-    }
-    function refreshOutputs() {
-      loadOutputs();
-      loadHeadphones();
     }
     function debounce(callback, delay) {
       let timer = null;
@@ -763,7 +770,7 @@
       setStripStatus($('meterMappingStatus'), `${changes.length} changed samples`, changes.length ? 'saved' : '');
     }
     async function loadMeters() {
-      if (meterRefreshInFlight || headphoneRefreshInFlight || headphoneWritePending || document.hidden || $('tab-mixer').getAttribute('aria-selected') !== 'true') return;
+      if (meterRefreshInFlight || outputRefreshInFlight || outputWritePending || headphoneWritePending || document.hidden || $('tab-mixer').getAttribute('aria-selected') !== 'true') return;
       meterRefreshInFlight = true;
       try {
         const meters = await fetchJson('/api/mixer/meters?' + qs({ host: $('host').value }));
@@ -832,7 +839,7 @@
     $('set').addEventListener('click', setPath);
     $('probe').addEventListener('click', probe);
     $('loadPreamps').addEventListener('click', loadPreamps);
-    $('loadOutputs').addEventListener('click', refreshOutputs);
+    $('loadOutputs').addEventListener('click', () => loadOutputs());
     document.querySelectorAll('[data-mix-bus]').forEach(button => button.addEventListener('click', () => writeMixerFader(button)));
     $('allMeters').addEventListener('toggle', loadMeters);
     $('captureMeterBaseline').addEventListener('click', captureMeterBaseline);
@@ -848,32 +855,29 @@
       headphoneCount = 0;
       loadPreamps();
       loadOutputs();
-      loadHeadphones();
     });
-    // HTTP has no verified push subscription yet, so polling is the recovery
-    // path for physical-panel and other-client changes.
+    // HTTP has no verified push subscription yet, so polling remains the
+    // recovery path for physical-panel input changes.
     setInterval(() => {
       if (!document.hidden) {
         loadPreamps({ quiet: true });
-        loadOutputs({ quiet: true });
       }
     }, 750);
     setInterval(() => {
-      if (!document.hidden && $('tab-outputs').getAttribute('aria-selected') === 'true') loadHeadphones({ quiet: true });
+      // Output trims use one bounded vendor-state snapshot for both line and
+      // headphone controls while their tab is visible.
+      if (!document.hidden && $('tab-outputs').getAttribute('aria-selected') === 'true') loadOutputs({ quiet: true });
     }, 5000);
     setInterval(loadMeters, 125);
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) {
         loadPreamps({ quiet: true });
-        loadOutputs({ quiet: true });
-        if ($('tab-outputs').getAttribute('aria-selected') === 'true') loadHeadphones({ quiet: true });
+        if ($('tab-outputs').getAttribute('aria-selected') === 'true') loadOutputs({ quiet: true });
         loadMeters();
       }
     });
     activateTab(window.location.hash.slice(1), { updateHash: false });
     loadPreamps();
-    loadOutputs();
-    loadHeadphones();
     loadMeterLabels();
     loadMeters();
   </script>

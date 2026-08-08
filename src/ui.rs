@@ -123,6 +123,9 @@ mod tests {
         assert!(outputs.contains("Phones"));
         assert!(outputs.contains("id=\"phoneOut\""));
         assert!(!outputs.contains("Mic Preamps"));
+        assert!(html.contains("fetchJson('/api/outputs?'"));
+        assert!(html.contains("/api/outputs/line-trim"));
+        assert!(!html.contains("const outputPath = '/datastore/ext/obank/0'"));
     }
 
     #[test]

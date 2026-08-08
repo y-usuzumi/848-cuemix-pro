@@ -277,6 +277,23 @@ capture-validated faders and read-only meters, while Diagnostics keeps the raw
 read, write, and probe controls for the remaining datastore surface. The
 selected tab is retained in the URL fragment.
 
+### Line output trims
+
+The compatibility HTTP output bank advertises 12 analog channels and a
+`-99:0` trim range, but its trim values do not track changes made in CueMix Pro.
+The bounded vendor-state snapshot instead exposes physical line-output trim as
+one-byte property `0x1388`. A controlled read-only comparison matched Line Out 1
+at -35 dB to index `0` value `35` and Line Out 4 at -42 dB to index `3` value
+`42`; Line Outs 1-2 were members of the monitor group during that comparison.
+
+The Outputs tab discovers every `0x1388` record rather than assuming the 848's
+12-output inventory. It displays attenuation `100` as negative infinity and
+otherwise converts the byte to its negative integer dB value. One explicit
+slider change forms a protocol-`...:03` record
+`13:88:<u16 index>:01:<attenuation>` for only the freshly discovered output.
+The exact write is not exercised by automated verification. No line-output
+write is sent while rendering, refreshing, polling, or testing.
+
 ### Headphone outputs
 
 Headphone volume is not present in the HTTP compatibility datastore. A bounded,
@@ -307,10 +324,11 @@ infinity. The UI serializes requests against the local meter session and never
 sends a headphone write automatically. While Outputs is visible, a five-second
 read-only snapshot poll recovers front-panel or other-controller changes until
 the vendor notification lifecycle is implemented. Close CueMix Pro before
-changing a headphone gain: concurrent external-controller behavior has not been
-mapped. The exact `0x13b7` write is not exercised by automated verification; its
-record envelope and attenuation conversion are derived from the installed
-CueMix model and generation-compatible output-trim traffic.
+changing an output gain: concurrent external-controller behavior has not been
+mapped. Line and headphone reads share the same bounded snapshot. The exact
+`0x13b7` write is not exercised by automated verification; its record envelope
+and attenuation conversion are derived from the installed CueMix model and
+generation-compatible output-trim traffic.
 
 ### Mixer faders
 

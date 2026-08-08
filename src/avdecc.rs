@@ -61,8 +61,20 @@ pub(crate) struct HeadphoneOutput {
     pub(crate) attenuation: [u8; 2],
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LineOutput {
+    pub(crate) channel_index: u16,
+    pub(crate) attenuation: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OutputInventory {
+    pub(crate) line_outputs: Vec<LineOutput>,
+    pub(crate) headphone_outputs: Vec<HeadphoneOutput>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum HeadphoneTrim {
+pub(crate) enum OutputTrim {
     NegativeInfinity,
     Decibels(i16),
 }
@@ -74,16 +86,17 @@ struct VendorStateRecord {
     value: Vec<u8>,
 }
 
+const LINE_OUTPUT_TRIM_PROPERTY: u16 = 0x1388;
 const HEADPHONE_TRIM_PROPERTY: u16 = 0x13b7;
 
-impl HeadphoneTrim {
+impl OutputTrim {
     pub(crate) fn parse(value: &str) -> Result<Self, String> {
         if value == "-inf" {
             return Ok(Self::NegativeInfinity);
         }
         match value.parse::<i16>() {
             Ok(decibels) if (-99..=0).contains(&decibels) => Ok(Self::Decibels(decibels)),
-            _ => Err("headphone trim must be -inf or an integer between -99 and 0 dB".to_string()),
+            _ => Err("output trim must be -inf or an integer between -99 and 0 dB".to_string()),
         }
     }
 
@@ -207,15 +220,14 @@ fn set_mixer_fader_once(
     Ok(())
 }
 
-/// Reads the headphone inventory and current trims from the same bounded
-/// initial vendor-state snapshot CueMix Pro uses. Unlike the HTTP output-bank
-/// collection, this discovers one or two stereo phone outputs without assuming
-/// a particular interface model or hard-coding its channel indices.
-pub(crate) fn read_headphone_outputs(
+/// Reads the physical line and headphone inventories and their current trims
+/// from the same bounded initial vendor-state snapshot CueMix Pro uses. The
+/// compatibility HTTP output bank does not track CueMix or front-panel changes.
+pub(crate) fn read_output_inventory(
     host: &str,
     target_entity_id: u64,
     timeout: Duration,
-) -> Result<Vec<HeadphoneOutput>, String> {
+) -> Result<OutputInventory, String> {
     const CUE_MIX_PROXY_ADDRESS: [u8; 6] = [0x01, 0x00, 0x00, 0x00, 0x01, 0x00];
     let mut proxy = AvdeccProxy::connect(host, "/", timeout)?;
     let controller_entity_id = proxy
@@ -223,7 +235,10 @@ pub(crate) fn read_headphone_outputs(
         .entity_id
         .ok_or("AVDECC Proxy did not return a controller identity")?;
     let (_, state) = proxy.start_vendor_state(target_entity_id, controller_entity_id, timeout)?;
-    headphone_outputs_from_state(&state)
+    Ok(OutputInventory {
+        line_outputs: line_outputs_from_state(&state)?,
+        headphone_outputs: headphone_outputs_from_state(&state)?,
+    })
 }
 
 /// Sends one explicitly requested linked-stereo headphone trim. The property
@@ -235,7 +250,7 @@ pub(crate) fn set_headphone_trim(
     host: &str,
     target_entity_id: u64,
     output_index: usize,
-    trim: HeadphoneTrim,
+    trim: OutputTrim,
     timeout: Duration,
 ) -> Result<(), String> {
     const RETRY_DELAY: Duration = Duration::from_millis(150);
@@ -257,7 +272,7 @@ fn set_headphone_trim_once(
     host: &str,
     target_entity_id: u64,
     output_index: usize,
-    trim: HeadphoneTrim,
+    trim: OutputTrim,
     timeout: Duration,
 ) -> Result<(), String> {
     const CUE_MIX_PROXY_ADDRESS: [u8; 6] = [0x01, 0x00, 0x00, 0x00, 0x01, 0x00];
@@ -273,7 +288,7 @@ fn set_headphone_trim_once(
     let output = outputs
         .get(output_index)
         .ok_or("that headphone output was not advertised by the device")?;
-    let data = headphone_trim_payload(output, trim);
+    let data = output_trim_payload(HEADPHONE_TRIM_PROPERTY, &output.channel_indices, trim);
     proxy.vendor_request(
         target_entity_id,
         controller_entity_id,
@@ -285,11 +300,68 @@ fn set_headphone_trim_once(
     Ok(())
 }
 
-fn headphone_trim_payload(output: &HeadphoneOutput, trim: HeadphoneTrim) -> Vec<u8> {
+/// Sends one explicitly requested physical line-output trim. Its property and
+/// index are freshly discovered from the device before the write is formed.
+pub(crate) fn set_line_output_trim(
+    host: &str,
+    target_entity_id: u64,
+    output_index: usize,
+    trim: OutputTrim,
+    timeout: Duration,
+) -> Result<(), String> {
+    const RETRY_DELAY: Duration = Duration::from_millis(150);
+    match set_line_output_trim_once(host, target_entity_id, output_index, trim, timeout) {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            thread::sleep(RETRY_DELAY);
+            set_line_output_trim_once(host, target_entity_id, output_index, trim, timeout).map_err(
+                |retry_error| {
+                    format!(
+                        "line-output trim write failed after one fresh-session retry; first attempt: {first_error}; retry: {retry_error}"
+                    )
+                },
+            )
+        }
+    }
+}
+
+fn set_line_output_trim_once(
+    host: &str,
+    target_entity_id: u64,
+    output_index: usize,
+    trim: OutputTrim,
+    timeout: Duration,
+) -> Result<(), String> {
+    const CUE_MIX_PROXY_ADDRESS: [u8; 6] = [0x01, 0x00, 0x00, 0x00, 0x01, 0x00];
+    const PROPERTY_WRITE_PROTOCOL: [u8; 6] = [0x00, 0x01, 0xf2, 0x00, 0x00, 0x03];
+    let mut proxy = AvdeccProxy::connect(host, "/", timeout)?;
+    let controller_entity_id = proxy
+        .request_entity_id(CUE_MIX_PROXY_ADDRESS, timeout)?
+        .entity_id
+        .ok_or("AVDECC Proxy did not return a controller identity")?;
+    let (next_sequence, state) =
+        proxy.start_vendor_state(target_entity_id, controller_entity_id, timeout)?;
+    let outputs = line_outputs_from_state(&state)?;
+    let output = outputs
+        .get(output_index)
+        .ok_or("that line output was not advertised by the device")?;
+    let data = output_trim_payload(LINE_OUTPUT_TRIM_PROPERTY, &[output.channel_index], trim);
+    proxy.vendor_request(
+        target_entity_id,
+        controller_entity_id,
+        next_sequence,
+        PROPERTY_WRITE_PROTOCOL,
+        &data,
+        timeout,
+    )?;
+    Ok(())
+}
+
+fn output_trim_payload(property_id: u16, channel_indices: &[u16], trim: OutputTrim) -> Vec<u8> {
     let attenuation = trim.attenuation();
-    let mut data = Vec::with_capacity(12);
-    for channel_index in output.channel_indices {
-        data.extend_from_slice(&HEADPHONE_TRIM_PROPERTY.to_be_bytes());
+    let mut data = Vec::with_capacity(channel_indices.len() * 6);
+    for channel_index in channel_indices {
+        data.extend_from_slice(&property_id.to_be_bytes());
         data.extend_from_slice(&channel_index.to_be_bytes());
         data.push(1);
         data.push(attenuation);
@@ -297,26 +369,25 @@ fn headphone_trim_payload(output: &HeadphoneOutput, trim: HeadphoneTrim) -> Vec<
     data
 }
 
+fn line_outputs_from_state(state: &[VendorStateRecord]) -> Result<Vec<LineOutput>, String> {
+    output_channels_from_state(state, LINE_OUTPUT_TRIM_PROPERTY)?
+        .into_iter()
+        .map(|(channel_index, attenuation)| {
+            Ok(LineOutput {
+                channel_index,
+                attenuation,
+            })
+        })
+        .collect()
+}
+
 fn headphone_outputs_from_state(
     state: &[VendorStateRecord],
 ) -> Result<Vec<HeadphoneOutput>, String> {
-    let channels = state
-        .iter()
-        .filter(|record| record.property_id == HEADPHONE_TRIM_PROPERTY)
-        .map(|record| {
-            let [attenuation] = record.value.as_slice() else {
-                return Err("headphone trim state has an unexpected value size".to_string());
-            };
-            if *attenuation > 100 {
-                return Err("headphone trim state has an invalid attenuation".to_string());
-            }
-            Ok((record.property_index, *attenuation))
-        })
-        .collect::<Result<BTreeMap<_, _>, String>>()?;
+    let channels = output_channels_from_state(state, HEADPHONE_TRIM_PROPERTY)?;
     if !channels.len().is_multiple_of(2) {
         return Err("device advertised an incomplete stereo headphone output".to_string());
     }
-    let channels = channels.into_iter().collect::<Vec<_>>();
     channels
         .chunks_exact(2)
         .map(|pair| {
@@ -332,6 +403,26 @@ fn headphone_outputs_from_state(
             })
         })
         .collect()
+}
+
+fn output_channels_from_state(
+    state: &[VendorStateRecord],
+    property_id: u16,
+) -> Result<Vec<(u16, u8)>, String> {
+    let channels = state
+        .iter()
+        .filter(|record| record.property_id == property_id)
+        .map(|record| {
+            let [attenuation] = record.value.as_slice() else {
+                return Err("output trim state has an unexpected value size".to_string());
+            };
+            if *attenuation > 100 {
+                return Err("output trim state has an invalid attenuation".to_string());
+            }
+            Ok((record.property_index, *attenuation))
+        })
+        .collect::<Result<BTreeMap<_, _>, String>>()?;
+    Ok(channels.into_iter().collect())
 }
 
 /// Starts the capture-validated read-only meter lifecycle on a dedicated

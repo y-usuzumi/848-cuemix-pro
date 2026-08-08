@@ -130,3 +130,28 @@ fn formats_discovered_headphone_outputs_with_infinity_and_without_negative_zero(
     assert!(json.contains("\"trim_db\":[null,-13]"));
     assert!(!json.contains("-0"));
 }
+
+#[test]
+fn formats_the_combined_physical_output_inventory() {
+    let json = output_inventory_json(&OutputInventory {
+        line_outputs: vec![
+            LineOutput {
+                channel_index: 0,
+                attenuation: 35,
+            },
+            LineOutput {
+                channel_index: 3,
+                attenuation: 42,
+            },
+        ],
+        headphone_outputs: vec![HeadphoneOutput {
+            channel_indices: [0, 1],
+            attenuation: [100, 100],
+        }],
+    });
+    assert!(json.contains("\"line_outputs\":["));
+    assert!(json.contains("\"channel_index\":0,\"attenuation\":35,\"trim_db\":-35"));
+    assert!(json.contains("\"channel_index\":3,\"attenuation\":42,\"trim_db\":-42"));
+    assert!(json.contains("\"headphone_outputs\":["));
+    assert!(json.contains("\"trim_db\":[null,null]"));
+}
