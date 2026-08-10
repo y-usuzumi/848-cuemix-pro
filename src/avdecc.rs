@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -49,22 +49,124 @@ pub(crate) struct MixerMeters {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct MixerMeterFeedSnapshot {
+    pub(crate) revision: u64,
+    pub(crate) meters: MixerMeters,
+    pub(crate) closed: bool,
+}
+
+#[derive(Debug, Default)]
+struct MixerMeterFeedState {
+    revision: u64,
+    meters: MixerMeters,
+    closed: bool,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MixerMeterFeed {
+    state: Mutex<MixerMeterFeedState>,
+    changed: Condvar,
+}
+
+impl MixerMeterFeed {
+    pub(crate) fn snapshot(&self) -> Result<MixerMeterFeedSnapshot, String> {
+        self.state
+            .lock()
+            .map(|state| MixerMeterFeedSnapshot {
+                revision: state.revision,
+                meters: state.meters.clone(),
+                closed: state.closed,
+            })
+            .map_err(|_| "meter worker data is unavailable".to_string())
+    }
+
+    pub(crate) fn wait_after(
+        &self,
+        revision: u64,
+        timeout: Duration,
+    ) -> Result<Option<MixerMeterFeedSnapshot>, String> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "meter worker data is unavailable".to_string())?;
+        let (state, wait) = self
+            .changed
+            .wait_timeout_while(state, timeout, |state| {
+                state.revision == revision && !state.closed
+            })
+            .map_err(|_| "meter worker data is unavailable".to_string())?;
+        if wait.timed_out() && state.revision == revision && !state.closed {
+            return Ok(None);
+        }
+        Ok(Some(MixerMeterFeedSnapshot {
+            revision: state.revision,
+            meters: state.meters.clone(),
+            closed: state.closed,
+        }))
+    }
+
+    fn publish(&self, records: Vec<MixerMeterRecord>, error: Option<String>) {
+        if let Ok(mut state) = self.state.lock() {
+            if !records.is_empty() {
+                state.meters.records = records;
+                state.meters.updated_at = Some(Instant::now());
+            }
+            state.meters.error = error;
+            state.revision = state.revision.wrapping_add(1);
+            self.changed.notify_all();
+        }
+    }
+
+    fn close(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.closed = true;
+            self.changed.notify_all();
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct MixerMeterRecord {
     pub(crate) property_id: u16,
     pub(crate) index: u8,
     pub(crate) values: Vec<u16>,
 }
 
+impl MixerMeterRecord {
+    pub(crate) fn channels(&self) -> Vec<u8> {
+        self.values
+            .iter()
+            .flat_map(|value| value.to_be_bytes())
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HeadphoneOutput {
     pub(crate) channel_indices: [u16; 2],
     pub(crate) attenuation: [u8; 2],
+    pub(crate) meter_path: Option<MeterPath>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LineOutput {
     pub(crate) channel_index: u16,
     pub(crate) attenuation: u8,
+    pub(crate) meter_path: Option<MeterPath>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MeterPath {
+    pub(crate) property_id: u16,
+    pub(crate) record_index: u8,
+    pub(crate) channel_index: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LineInput {
+    pub(crate) channel_index: u16,
+    pub(crate) gain_db: u8,
+    pub(crate) phase_inverted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,6 +190,11 @@ struct VendorStateRecord {
 
 const LINE_OUTPUT_TRIM_PROPERTY: u16 = 0x1388;
 const HEADPHONE_TRIM_PROPERTY: u16 = 0x13b7;
+const LINE_OUTPUT_METER_PATH_PROPERTY: u16 = 0x93ac;
+const HEADPHONE_METER_PATH_PROPERTY: u16 = 0x13b4;
+const LINE_INPUT_GAIN_PROPERTY: u16 = 0x13b2;
+const LINE_INPUT_PHASE_PROPERTY: u16 = 0x13b3;
+const LINE_INPUT_GAIN_MAX_DB: u8 = 20;
 
 impl OutputTrim {
     pub(crate) fn parse(value: &str) -> Result<Self, String> {
@@ -241,6 +348,115 @@ pub(crate) fn read_output_inventory(
     })
 }
 
+/// Reads the line-input gain and polarity inventory from CueMix's bounded
+/// initial vendor-state snapshot. The gain records independently validate the
+/// HTTP Analog bank's inventory; polarity is available only in this snapshot.
+pub(crate) fn read_line_inputs(
+    host: &str,
+    target_entity_id: u64,
+    timeout: Duration,
+) -> Result<Vec<LineInput>, String> {
+    const CUE_MIX_PROXY_ADDRESS: [u8; 6] = [0x01, 0x00, 0x00, 0x00, 0x01, 0x00];
+    let mut proxy = AvdeccProxy::connect(host, "/", timeout)?;
+    let controller_entity_id = proxy
+        .request_entity_id(CUE_MIX_PROXY_ADDRESS, timeout)?
+        .entity_id
+        .ok_or("AVDECC Proxy did not return a controller identity")?;
+    let (_, state) = proxy.start_vendor_state(target_entity_id, controller_entity_id, timeout)?;
+    line_inputs_from_state(&state)
+}
+
+/// Sends one explicitly requested line-input polarity value after rediscovering
+/// the target's input indices in a fresh vendor-state session.
+pub(crate) fn set_line_input_phase(
+    host: &str,
+    target_entity_id: u64,
+    input_index: usize,
+    phase_inverted: bool,
+    timeout: Duration,
+) -> Result<(), String> {
+    set_line_input_property(
+        host,
+        target_entity_id,
+        input_index,
+        LINE_INPUT_PHASE_PROPERTY,
+        u8::from(phase_inverted),
+        "line-input polarity",
+        timeout,
+    )
+}
+
+fn set_line_input_property(
+    host: &str,
+    target_entity_id: u64,
+    input_index: usize,
+    property_id: u16,
+    value: u8,
+    description: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    const RETRY_DELAY: Duration = Duration::from_millis(150);
+    match set_line_input_property_once(
+        host,
+        target_entity_id,
+        input_index,
+        property_id,
+        value,
+        timeout,
+    ) {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            thread::sleep(RETRY_DELAY);
+            set_line_input_property_once(
+                host,
+                target_entity_id,
+                input_index,
+                property_id,
+                value,
+                timeout,
+            )
+            .map_err(|retry_error| {
+                format!(
+                    "{description} write failed after one fresh-session retry; first attempt: {first_error}; retry: {retry_error}"
+                )
+            })
+        }
+    }
+}
+
+fn set_line_input_property_once(
+    host: &str,
+    target_entity_id: u64,
+    input_index: usize,
+    property_id: u16,
+    value: u8,
+    timeout: Duration,
+) -> Result<(), String> {
+    const CUE_MIX_PROXY_ADDRESS: [u8; 6] = [0x01, 0x00, 0x00, 0x00, 0x01, 0x00];
+    const PROPERTY_WRITE_PROTOCOL: [u8; 6] = [0x00, 0x01, 0xf2, 0x00, 0x00, 0x03];
+    let mut proxy = AvdeccProxy::connect(host, "/", timeout)?;
+    let controller_entity_id = proxy
+        .request_entity_id(CUE_MIX_PROXY_ADDRESS, timeout)?
+        .entity_id
+        .ok_or("AVDECC Proxy did not return a controller identity")?;
+    let (next_sequence, state) =
+        proxy.start_vendor_state(target_entity_id, controller_entity_id, timeout)?;
+    let inputs = line_inputs_from_state(&state)?;
+    let input = inputs
+        .get(input_index)
+        .ok_or("that line input was not advertised by the device")?;
+    let data = one_byte_property_payload(property_id, input.channel_index, value);
+    proxy.vendor_request(
+        target_entity_id,
+        controller_entity_id,
+        next_sequence,
+        PROPERTY_WRITE_PROTOCOL,
+        &data,
+        timeout,
+    )?;
+    Ok(())
+}
+
 /// Sends one explicitly requested linked-stereo headphone trim. The property
 /// is advertised by the device and identified by CueMix Pro's kHeadphoneTrim
 /// model; the record envelope and one-byte attenuation follow the same
@@ -369,13 +585,68 @@ fn output_trim_payload(property_id: u16, channel_indices: &[u16], trim: OutputTr
     data
 }
 
+fn one_byte_property_payload(property_id: u16, property_index: u16, value: u8) -> [u8; 6] {
+    let [property_high, property_low] = property_id.to_be_bytes();
+    let [index_high, index_low] = property_index.to_be_bytes();
+    [property_high, property_low, index_high, index_low, 1, value]
+}
+
+fn line_inputs_from_state(state: &[VendorStateRecord]) -> Result<Vec<LineInput>, String> {
+    let gains = one_byte_property_from_state(state, LINE_INPUT_GAIN_PROPERTY, "line-input gain")?;
+    let phases =
+        one_byte_property_from_state(state, LINE_INPUT_PHASE_PROPERTY, "line-input polarity")?;
+    if gains.keys().ne(phases.keys()) {
+        return Err("line-input gain and polarity inventories do not match".to_string());
+    }
+    gains
+        .into_iter()
+        .map(|(channel_index, gain_db)| {
+            if gain_db > LINE_INPUT_GAIN_MAX_DB {
+                return Err(
+                    "line-input gain state is outside the advertised 0-20 dB range".to_string(),
+                );
+            }
+            let phase = phases[&channel_index];
+            let phase_inverted = match phase {
+                0 => false,
+                1 => true,
+                _ => return Err("line-input polarity state is not boolean".to_string()),
+            };
+            Ok(LineInput {
+                channel_index,
+                gain_db,
+                phase_inverted,
+            })
+        })
+        .collect()
+}
+
+fn one_byte_property_from_state(
+    state: &[VendorStateRecord],
+    property_id: u16,
+    description: &str,
+) -> Result<BTreeMap<u16, u8>, String> {
+    state
+        .iter()
+        .filter(|record| record.property_id == property_id)
+        .map(|record| {
+            let [value] = record.value.as_slice() else {
+                return Err(format!("{description} state has an unexpected value size"));
+            };
+            Ok((record.property_index, *value))
+        })
+        .collect()
+}
+
 fn line_outputs_from_state(state: &[VendorStateRecord]) -> Result<Vec<LineOutput>, String> {
+    let meter_paths = meter_paths_from_state(state, LINE_OUTPUT_METER_PATH_PROPERTY)?;
     output_channels_from_state(state, LINE_OUTPUT_TRIM_PROPERTY)?
         .into_iter()
         .map(|(channel_index, attenuation)| {
             Ok(LineOutput {
                 channel_index,
                 attenuation,
+                meter_path: meter_paths.get(&channel_index).copied(),
             })
         })
         .collect()
@@ -385,12 +656,14 @@ fn headphone_outputs_from_state(
     state: &[VendorStateRecord],
 ) -> Result<Vec<HeadphoneOutput>, String> {
     let channels = output_channels_from_state(state, HEADPHONE_TRIM_PROPERTY)?;
+    let meter_paths = meter_paths_from_state(state, HEADPHONE_METER_PATH_PROPERTY)?;
     if !channels.len().is_multiple_of(2) {
         return Err("device advertised an incomplete stereo headphone output".to_string());
     }
     channels
         .chunks_exact(2)
-        .map(|pair| {
+        .enumerate()
+        .map(|(output_index, pair)| {
             let [(left_index, left_attenuation), (right_index, right_attenuation)] = pair else {
                 unreachable!("chunks_exact always returns stereo pairs");
             };
@@ -400,7 +673,35 @@ fn headphone_outputs_from_state(
             Ok(HeadphoneOutput {
                 channel_indices: [*left_index, *right_index],
                 attenuation: [*left_attenuation, *right_attenuation],
+                meter_path: u16::try_from(output_index)
+                    .ok()
+                    .and_then(|index| meter_paths.get(&index).copied()),
             })
+        })
+        .collect()
+}
+
+fn meter_paths_from_state(
+    state: &[VendorStateRecord],
+    property_id: u16,
+) -> Result<BTreeMap<u16, MeterPath>, String> {
+    state
+        .iter()
+        .filter(|record| record.property_id == property_id)
+        .map(|record| {
+            let [property_high, property_low, record_index, channel_index] =
+                record.value.as_slice()
+            else {
+                return Err("meter path state has an unexpected value size".to_string());
+            };
+            Ok((
+                record.property_index,
+                MeterPath {
+                    property_id: u16::from_be_bytes([*property_high, *property_low]),
+                    record_index: *record_index,
+                    channel_index: *channel_index,
+                },
+            ))
         })
         .collect()
 }
@@ -432,9 +733,9 @@ pub(crate) fn start_mixer_meter_worker(
     host: String,
     target_entity_id: u64,
     timeout: Duration,
-) -> (mpsc::Sender<mpsc::Sender<()>>, Arc<Mutex<MixerMeters>>) {
+) -> (mpsc::Sender<mpsc::Sender<()>>, Arc<MixerMeterFeed>) {
     let (stop_sender, stop_receiver) = mpsc::channel();
-    let meters = Arc::new(Mutex::new(MixerMeters::default()));
+    let meters = Arc::new(MixerMeterFeed::default());
     let worker_meters = Arc::clone(&meters);
     thread::spawn(move || {
         run_mixer_meter_worker(
@@ -453,18 +754,20 @@ fn run_mixer_meter_worker(
     target_entity_id: u64,
     timeout: Duration,
     stop_receiver: mpsc::Receiver<mpsc::Sender<()>>,
-    meters: Arc<Mutex<MixerMeters>>,
+    meters: Arc<MixerMeterFeed>,
 ) {
     const RETRY_DELAY: Duration = Duration::from_millis(500);
-    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+    const POLL_INTERVAL: Duration = Duration::from_millis(5);
     loop {
         if let Ok(reply) = stop_receiver.try_recv() {
+            meters.close();
             let _ = reply.send(());
             return;
         }
         match MixerMeterSession::open(host, target_entity_id, timeout) {
             Ok(mut session) => loop {
                 if let Ok(reply) = stop_receiver.try_recv() {
+                    meters.close();
                     let _ = reply.send(());
                     return;
                 }
@@ -480,6 +783,7 @@ fn run_mixer_meter_worker(
             Err(error) => update_mixer_meters(&meters, Vec::new(), Some(error)),
         }
         if let Ok(reply) = stop_receiver.recv_timeout(RETRY_DELAY) {
+            meters.close();
             let _ = reply.send(());
             return;
         }
@@ -487,17 +791,11 @@ fn run_mixer_meter_worker(
 }
 
 fn update_mixer_meters(
-    meters: &Arc<Mutex<MixerMeters>>,
+    meters: &Arc<MixerMeterFeed>,
     records: Vec<MixerMeterRecord>,
     error: Option<String>,
 ) {
-    if let Ok(mut current) = meters.lock() {
-        if !records.is_empty() {
-            current.records = records;
-            current.updated_at = Some(Instant::now());
-        }
-        current.error = error;
-    }
+    meters.publish(records, error);
 }
 
 struct MixerMeterSession {
@@ -563,8 +861,8 @@ impl MixerMeterSession {
 
 fn parse_mixer_meter_page(data: &[u8]) -> Result<Vec<MixerMeterRecord>, String> {
     // Captured ...:04 pages begin with an opaque u16 page counter, followed by
-    // property/u8-bank/u8-byte-length records. Meter samples are big-endian
-    // u16 values; their dB calibration has not yet been established.
+    // property/u8-bank/u8-byte-length records. Each big-endian u16 meter word
+    // packs two u8 channels; non-sentinel bytes use 0.5 dB attenuation steps.
     let mut cursor = 2usize;
     let mut records = Vec::new();
     if data.len() < cursor {

@@ -143,7 +143,11 @@ fn discovers_line_and_headphone_outputs_from_their_distinct_vendor_properties() 
     let state = parse_vendor_state_records(&[
         0x13, 0x88, 0x00, 0x00, 0x01, 0x23, // Line Out 1: -35 dB
         0x13, 0x88, 0x00, 0x03, 0x01, 0x2a, // Line Out 4: -42 dB
+        0x93, 0xac, 0x00, 0x00, 0x04, 0x13, 0xad, 0x01, 0x00, // Line Out 1 meter
+        0x93, 0xac, 0x00, 0x03, 0x04, 0x13, 0xad, 0x00, 0x03, // Line Out 4 meter
         0x13, 0x9d, 0x00, 0x00, 0x01, 0x00, // unrelated four-channel state
+        0x13, 0xb4, 0x00, 0x00, 0x04, 0x13, 0xad, 0x02, 0x00, // Phones 1 meter
+        0x13, 0xb4, 0x00, 0x01, 0x04, 0x13, 0xad, 0x03, 0x02, // Phones 2 meter
         0x13, 0xb7, 0x00, 0x00, 0x01, 0x64, // Phones 1 L: -infinity
         0x13, 0xb7, 0x00, 0x01, 0x01, 0x64, // Phones 1 R: -infinity
         0x13, 0xb7, 0x00, 0x02, 0x01, 0x32, // Phones 2 L: -50 dB
@@ -156,10 +160,20 @@ fn discovers_line_and_headphone_outputs_from_their_distinct_vendor_properties() 
             LineOutput {
                 channel_index: 0,
                 attenuation: 35,
+                meter_path: Some(MeterPath {
+                    property_id: 0x13ad,
+                    record_index: 1,
+                    channel_index: 0,
+                }),
             },
             LineOutput {
                 channel_index: 3,
                 attenuation: 42,
+                meter_path: Some(MeterPath {
+                    property_id: 0x13ad,
+                    record_index: 0,
+                    channel_index: 3,
+                }),
             },
         ]
     );
@@ -169,13 +183,74 @@ fn discovers_line_and_headphone_outputs_from_their_distinct_vendor_properties() 
             HeadphoneOutput {
                 channel_indices: [0, 1],
                 attenuation: [100, 100],
+                meter_path: Some(MeterPath {
+                    property_id: 0x13ad,
+                    record_index: 2,
+                    channel_index: 0,
+                }),
             },
             HeadphoneOutput {
                 channel_indices: [2, 3],
                 attenuation: [50, 50],
+                meter_path: Some(MeterPath {
+                    property_id: 0x13ad,
+                    record_index: 3,
+                    channel_index: 2,
+                }),
             },
         ]
     );
+}
+
+#[test]
+fn discovers_sorted_line_input_gains_and_polarities() {
+    let state = parse_vendor_state_records(&[
+        0x13, 0xb2, 0x00, 0x01, 0x01, 0x14, // Line In 6: +20 dB
+        0x13, 0xb3, 0x00, 0x00, 0x01, 0x01, // Line In 5: inverted
+        0x13, 0xb2, 0x00, 0x00, 0x01, 0x07, // Line In 5: +7 dB
+        0x13, 0xb3, 0x00, 0x01, 0x01, 0x00, // Line In 6: normal
+    ])
+    .unwrap();
+    assert_eq!(
+        line_inputs_from_state(&state).unwrap(),
+        vec![
+            LineInput {
+                channel_index: 0,
+                gain_db: 7,
+                phase_inverted: true,
+            },
+            LineInput {
+                channel_index: 1,
+                gain_db: 20,
+                phase_inverted: false,
+            },
+        ]
+    );
+    assert_eq!(
+        one_byte_property_payload(LINE_INPUT_PHASE_PROPERTY, 7, 1),
+        [0x13, 0xb3, 0x00, 0x07, 0x01, 0x01]
+    );
+}
+
+#[test]
+fn rejects_mismatched_or_unsafe_line_input_state() {
+    let mismatched = parse_vendor_state_records(&[
+        0x13, 0xb2, 0x00, 0x00, 0x01, 0x00, 0x13, 0xb3, 0x00, 0x01, 0x01, 0x00,
+    ])
+    .unwrap();
+    assert!(line_inputs_from_state(&mismatched).is_err());
+
+    let invalid_gain = parse_vendor_state_records(&[
+        0x13, 0xb2, 0x00, 0x00, 0x01, 0x15, 0x13, 0xb3, 0x00, 0x00, 0x01, 0x00,
+    ])
+    .unwrap();
+    assert!(line_inputs_from_state(&invalid_gain).is_err());
+
+    let invalid_phase = parse_vendor_state_records(&[
+        0x13, 0xb2, 0x00, 0x00, 0x01, 0x00, 0x13, 0xb3, 0x00, 0x00, 0x01, 0x02,
+    ])
+    .unwrap();
+    assert!(line_inputs_from_state(&invalid_phase).is_err());
 }
 
 #[test]
@@ -197,6 +272,7 @@ fn discovers_single_phone_interfaces_and_rejects_wrapped_channel_pairs() {
         vec![HeadphoneOutput {
             channel_indices: [8, 9],
             attenuation: [6, 6],
+            meter_path: None,
         }]
     );
 
@@ -220,6 +296,7 @@ fn encodes_one_linked_stereo_headphone_trim_and_rejects_unsafe_state() {
     let output = HeadphoneOutput {
         channel_indices: [2, 3],
         attenuation: [0, 0],
+        meter_path: None,
     };
     assert_eq!(
         output_trim_payload(
@@ -303,8 +380,10 @@ fn parses_capture_shaped_meter_pages_and_maps_fader_slots() {
     assert_eq!(records[0].property_id, 0x13ad);
     assert_eq!(records[0].index, 0);
     assert_eq!(records[0].values, vec![0xffff, 0x7e80]);
+    assert_eq!(records[0].channels(), vec![0xff, 0xff, 0x7e, 0x80]);
     assert_eq!(records[1].property_id, 0x13b9);
     assert_eq!(records[1].index, 2);
+    assert_eq!(records[1].channels(), vec![0xb4, 0xb4]);
     assert_eq!(MixerFader::MainHost11To12.meter_slot(), (0x13ad, 0, 5));
     assert_eq!(MixerFader::MainLineIn5To6.meter_slot(), (0x13ad, 0, 10));
 }
@@ -313,4 +392,32 @@ fn parses_capture_shaped_meter_pages_and_maps_fader_slots() {
 fn rejects_truncated_or_odd_meter_records() {
     assert!(parse_mixer_meter_page(&[0x3c]).is_err());
     assert!(parse_mixer_meter_page(&[0x3c, 0x21, 0x13, 0xad, 0, 1, 0]).is_err());
+}
+
+#[test]
+fn meter_feed_notifies_each_snapshot_and_closure() {
+    let feed = Arc::new(MixerMeterFeed::default());
+    update_mixer_meters(
+        &feed,
+        vec![MixerMeterRecord {
+            property_id: 0x138c,
+            index: 0,
+            values: vec![0x6a6f],
+        }],
+        None,
+    );
+    let update = feed
+        .wait_after(0, Duration::from_millis(0))
+        .unwrap()
+        .expect("published meter snapshot");
+    assert_eq!(update.revision, 1);
+    assert_eq!(update.meters.records[0].channels(), vec![106, 111]);
+    assert!(!update.closed);
+
+    feed.close();
+    let closed = feed
+        .wait_after(update.revision, Duration::from_millis(0))
+        .unwrap()
+        .expect("feed closure");
+    assert!(closed.closed);
 }
