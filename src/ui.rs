@@ -110,6 +110,8 @@ mod tests {
             .next()
             .expect("inputs panel contents");
         assert!(inputs.contains("Mic Preamps"));
+        assert!(inputs.contains("Line Inputs"));
+        assert!(inputs.contains("id=\"lineInputOut\""));
         assert!(!inputs.contains("Analog Output Gains"));
 
         let outputs = html
@@ -125,6 +127,48 @@ mod tests {
         assert!(!outputs.contains("Mic Preamps"));
         assert!(html.contains("fetchJson('/api/outputs?'"));
         assert!(html.contains("/api/outputs/line-trim"));
+        assert!(html.contains("fetchJson('/api/inputs/lines?'"));
+        assert!(html.contains("const lineInputPath = '/datastore/ext/ibank/1'"));
+        assert!(html.contains("const lineOutputPath = '/datastore/ext/obank/0'"));
+        assert!(html.contains("/api/inputs/line-phase"));
+        assert!(html.contains("switchMarkup(index, 'phase', 'Ø', data[key('phase')], 'Polarity')"));
+        assert!(html
+            .contains("id=\"line-in-${index}-phase\" type=\"checkbox\" aria-label=\"Polarity\""));
+        assert!(html.contains("class=\"channel-name-button\""));
+        assert!(html.contains("function bindPreampNameEditor("));
+        assert!(html.contains("function bindChannelNameEditor("));
+        assert!(html.contains("id=\"line-in-${index}-name\""));
+        assert!(html.contains("id=\"out-${index}-name\""));
+        assert!(html.contains("path: lineInputFieldPath(index, 'name')"));
+        assert!(html.contains("path: lineOutputFieldPath(index, output, 'name')"));
+        assert!(html.contains("class=\"gain-fader\" type=\"range\" orient=\"vertical\""));
+        assert!(html.contains(".switches { display: flex; justify-content: center"));
+        assert!(!html.contains("class=\"switch-state\""));
+        assert!(html.contains("channelDisplayLabel(data[`ch/${channel}/name`]"));
+        assert!(html.contains("meterLaneMarkup(`mic-${index}-meter`)"));
+        assert!(html.contains("meterLaneMarkup(`line-in-${index}-meter`)"));
+        assert!(html.contains("meterLaneMarkup(`out-${index}-meter`)"));
+        assert!(html.contains("meterLaneMarkup(`phone-${index}-meter-l`)"));
+        assert!(html.contains("meterLaneMarkup(`phone-${index}-meter-r`)"));
+        assert!(html.contains("new EventSource('/api/mixer/meters/events?'"));
+        assert!(html.contains("requestAnimationFrame"));
+        assert!(html.contains("!Array.isArray(meters.records) || !meters.records.length"));
+        for mark in [
+            "'−∞'", "'−48'", "'−36'", "'−24'", "'−12'", "'−6'", "'−3'", "'clip'",
+        ] {
+            assert!(html.contains(mark), "missing meter mark {mark}");
+        }
+        assert!(html.contains("function meterScaleMarkup()"));
+        assert!(html.contains("const meterDbPerStep = 0.5"));
+        assert!(html.contains("return -Number(value) * meterDbPerStep"));
+        assert!(html.contains("const percent = meterPercent(value)"));
+        assert!(html.contains("fill.style.height = `${percent}%`"));
+        assert!(html.contains("class=\"vertical-meter-column\""));
+        assert!(html.contains("const meterPeakHoldMs = 1000"));
+        assert!(html.contains("function renderMeterPeak("));
+        assert!(html.contains("class=\"meter-peak\""));
+        assert!(html.contains("style=\"bottom:${point.percent}%\""));
+        assert!(!html.contains("setInterval(loadMeters"));
         assert!(!html.contains("const outputPath = '/datastore/ext/obank/0'"));
     }
 

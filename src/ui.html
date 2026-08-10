@@ -97,29 +97,43 @@
       margin-top: 16px;
       align-items: start;
     }
-    .preamp-grid {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+    .preamp-grid, .line-input-grid, .output-grid, .phone-grid {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: stretch;
+      justify-content: flex-start;
       gap: 10px;
     }
-    .output-grid {
-      display: grid;
-      grid-template-columns: repeat(6, minmax(0, 1fr));
-      gap: 10px;
-    }
-    .output-grid .strip { gap: 8px; }
+    .line-inputs { margin-top: 22px; padding-top: 12px; border-top: 1px solid var(--line); }
+    .line-input-note { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
     .phone-outputs { margin-top: 22px; padding-top: 12px; border-top: 1px solid var(--line); }
-    .phone-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; max-width: 600px; }
+    .phone-grid { max-width: 600px; }
+    .phone-grid .strip-channel-body { grid-template-columns: 90px auto; }
+    .phone-grid .gain-value { font-size: 12px; white-space: nowrap; }
     .phone-note { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
     .mixer-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-    .mixer-card { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+    .mixer-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+    .mixer-card-controls { display: grid; gap: 8px; min-width: 0; }
     .mixer-card p { margin: 0; color: var(--muted); font-size: 12px; }
     .mixer-levels { display: flex; gap: 6px; }
     .mixer-levels button { flex: 1; min-height: 32px; padding: 6px 8px; }
-    .pair-meter { height: 7px; }
-    .pair-meter .meter-lane { display: block; height: 100%; }
-    .meter-lane { overflow: hidden; border-radius: 999px; background: var(--line); }
-    .meter-fill { display: block; width: 0%; height: 100%; background: var(--accent); transition: width 80ms linear; }
+    .channel-meter, .pair-meter { display: grid; grid-template-columns: 8px 25px; gap: 4px; align-items: stretch; }
+    .channel-meter { height: 220px; }
+    .pair-meter { min-height: 150px; }
+    .stereo-channel-meter { grid-template-columns: 8px 8px 25px; }
+    .vertical-meter-column { display: grid; grid-template-rows: minmax(0, 1fr) 12px; gap: 2px; min-height: 0; }
+    .vertical-meter-label { color: var(--muted); font: 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; text-align: center; }
+    .meter-lane { position: relative; display: block; min-height: 0; overflow: hidden; border-radius: 999px; background: var(--line); }
+    .meter-fill { position: absolute; right: 0; bottom: 0; left: 0; display: block; height: 0%; background: var(--accent); transition: height 80ms linear; }
+    .meter-peak { position: absolute; right: 0; bottom: 0%; left: 0; z-index: 1; display: block; height: 2px; background: var(--ink); opacity: 0; pointer-events: none; }
+    .meter-scale { position: relative; display: block; min-height: 0; color: var(--muted); font: 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .stereo-channel-meter .meter-scale { height: calc(100% - 14px); }
+    .meter-mark { position: absolute; left: 5px; transform: translateY(50%); white-space: nowrap; }
+    .meter-mark::before { content: ""; position: absolute; top: 50%; left: -5px; width: 4px; border-top: 1px solid var(--muted); opacity: .7; }
+    .meter-mark.first { transform: none; }
+    .meter-mark.first::before { top: auto; bottom: 0; }
+    .meter-mark.last { transform: translateY(100%); }
+    .meter-mark.last::before { top: 0; }
     .meter-feed { margin-top: 10px; color: var(--muted); font-size: 12px; }
     .meter-feed summary { cursor: pointer; }
     .meter-mapping-tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 10px; }
@@ -127,38 +141,45 @@
     .meter-mapping-result { margin: 8px 0 0; padding: 8px; min-height: 0; max-height: 180px; font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
     .meter-groups { display: grid; gap: 8px; margin-top: 10px; }
     .meter-group { display: grid; gap: 4px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
-    .meter-values { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 5px; }
-    .meter-channel { display: grid; gap: 2px; min-width: 0; }
+    .meter-values { display: grid; grid-template-columns: repeat(auto-fill, minmax(82px, 1fr)); gap: 8px; }
+    .meter-channel { display: grid; grid-template-columns: 8px 25px; grid-template-rows: auto 120px; gap: 3px 4px; min-width: 0; }
     .meter-channel-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .meter-channel .meter-lane { display: block; height: 6px; }
+    .meter-channel .meter-channel-name { grid-column: 1 / -1; }
     .strip {
+      flex: 0 0 184px;
+      width: 184px;
       min-width: 0;
       display: grid;
-      gap: 12px;
-      padding: 12px;
+      gap: 10px;
+      padding: 10px;
       border: 1px solid var(--line);
-      border-radius: 6px;
+      border-radius: 10px;
       background: var(--panel);
     }
     .strip-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-    .strip-head strong { font-size: 15px; }
-    .gain-value { color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 700; }
-    .strip input[type="range"] { min-height: auto; width: 100%; padding: 0; accent-color: var(--accent); }
-    .strip-name input { width: 100%; }
-    .switches { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+    .strip-head strong { min-width: 0; overflow: hidden; font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
+    .channel-name-button { min-width: 0; padding: 0 0 3px; overflow: hidden; background: transparent; border: 0; border-bottom: 1px dashed #8aa491; border-radius: 0; color: var(--ink); font: inherit; font-size: 15px; font-weight: 700; text-align: left; text-overflow: ellipsis; }
+    .channel-name-button:hover, .channel-name-button:focus-visible { color: var(--accent); border-bottom-color: var(--accent); }
+    .channel-name-editor { width: 100%; min-height: 32px; padding: 5px 7px; font-size: 14px; font-weight: 650; }
+    .strip-channel-body { display: grid; grid-template-columns: 64px auto; align-items: end; justify-content: center; gap: 14px; min-width: 0; }
+    .gain-control, .meter-control { display: grid; grid-template-rows: 14px 21px 220px; gap: 6px; min-width: 0; }
+    .meter-control .channel-meter { grid-row: 3; }
+    .control-kicker { color: var(--muted); font-size: 10px; font-weight: 750; line-height: 14px; letter-spacing: .08em; text-align: center; text-transform: uppercase; }
+    .gain-value { color: var(--accent); font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 750; line-height: 21px; text-align: center; }
+    .strip input[type="range"].gain-fader { width: 30px; height: 220px; min-height: 180px; margin: 0 auto; padding: 0; accent-color: var(--accent); appearance: slider-vertical; direction: rtl; writing-mode: vertical-lr; }
+    .switches { display: flex; justify-content: center; gap: 6px; }
     .switch {
-      display: flex;
-      min-height: 32px;
-      align-items: center;
-      justify-content: center;
-      gap: 5px;
-      border: 1px solid var(--line);
-      border-radius: 4px;
-      color: var(--muted);
+      position: relative;
+      display: block;
+      flex: 0 0 50px;
       cursor: pointer;
-      font-size: 12px;
     }
-    .switch input { min-height: auto; width: 15px; height: 15px; margin: 0; padding: 0; accent-color: var(--accent); }
+    .switch input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+    .switch-face { position: relative; display: grid; min-height: 36px; place-content: center; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: #f7f8f6; color: var(--ink); text-align: center; transition: background 120ms ease, border-color 120ms ease, color 120ms ease; }
+    .switch-label { overflow: hidden; font-size: 13px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+    .switch input:focus-visible + .switch-face { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .switch input:checked + .switch-face { border-color: var(--accent); background: var(--accent); color: var(--panel); }
+    .switch input:disabled + .switch-face { cursor: not-allowed; opacity: .55; }
     .strip-status { min-height: 17px; color: var(--muted); font-size: 12px; }
     .strip-status.pending, .strip-status.saved { color: var(--accent); }
     .strip-status.error { color: var(--warn); }
@@ -192,13 +213,10 @@
     .bad { color: var(--warn); font-weight: 700; }
     @media (max-width: 850px) {
       .toolbar, .grid { grid-template-columns: 1fr; }
-      .preamp-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .output-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .mixer-grid { grid-template-columns: 1fr; }
       header { align-items: start; }
     }
     @media (max-width: 480px) {
-      .preamp-grid, .output-grid { grid-template-columns: 1fr; }
       header { display: block; }
       .device-host { margin-top: 12px; }
       .tab { flex: 1 0 auto; padding-inline: 12px; }
@@ -223,9 +241,14 @@
     <section id="panel-inputs" class="preamp tab-panel" role="tabpanel" aria-labelledby="tab-inputs" tabindex="0">
       <div class="row">
         <h2 style="flex: 1">Mic Preamps</h2>
-        <button id="loadPreamps" class="secondary">Refresh</button>
+        <button id="loadInputs" class="secondary">Refresh All</button>
       </div>
       <div id="preampOut" class="preamp-grid"><div class="empty">Loading...</div></div>
+      <div class="line-inputs">
+        <h2>Line Inputs</h2>
+        <div id="lineInputOut" class="line-input-grid"><div class="empty">Loading...</div></div>
+        <p class="line-input-note">Line-input gain and polarity are discovered from the device. Close CueMix Pro before changing them here.</p>
+      </div>
     </section>
     <section id="panel-outputs" class="outputs tab-panel" role="tabpanel" aria-labelledby="tab-outputs" tabindex="0" hidden>
       <div class="row">
@@ -246,28 +269,34 @@
       </div>
       <div class="mixer-grid">
         <article class="mixer-card">
-          <strong>Main 1-2 · Host 11-12</strong>
-          <p>Capture-validated levels only.</p>
-          <div class="mixer-levels"><button data-mix-bus="main-1-2" data-mix-source="host-11-12" data-mix-level="-60" class="secondary">−60 dB</button><button data-mix-bus="main-1-2" data-mix-source="host-11-12" data-mix-level="-12" class="secondary">−12 dB</button></div>
-          <div class="pair-meter" aria-label="Main 1-2 Host 11-12 stereo-pair meter"><span class="meter-lane"><span id="meter-main-host" class="meter-fill"></span></span></div>
-          <div class="strip-status" id="mix-main-host-status" aria-live="polite"></div>
+          <div class="mixer-card-controls">
+            <strong>Main 1-2 · Host 11-12</strong>
+            <p>Capture-validated levels only.</p>
+            <div class="mixer-levels"><button data-mix-bus="main-1-2" data-mix-source="host-11-12" data-mix-level="-60" class="secondary">−60 dB</button><button data-mix-bus="main-1-2" data-mix-source="host-11-12" data-mix-level="-12" class="secondary">−12 dB</button></div>
+            <div class="strip-status" id="mix-main-host-status" aria-live="polite"></div>
+          </div>
+          <div class="pair-meter" aria-label="Main 1-2 Host 11-12 stereo-pair meter"><span class="meter-lane"><span id="meter-main-host" class="meter-fill"></span><span id="meter-main-host-peak" class="meter-peak" aria-hidden="true"></span></span></div>
         </article>
         <article class="mixer-card">
-          <strong>Headphone Mix · Host 11-12</strong>
-          <p>Capture-validated levels only.</p>
-          <div class="mixer-levels"><button data-mix-bus="headphone-mix" data-mix-source="host-11-12" data-mix-level="-60" class="secondary">−60 dB</button><button data-mix-bus="headphone-mix" data-mix-source="host-11-12" data-mix-level="-12" class="secondary">−12 dB</button></div>
-          <div class="pair-meter" aria-label="Headphone Mix Host 11-12 stereo-pair meter"><span class="meter-lane"><span id="meter-headphone-host" class="meter-fill"></span></span></div>
-          <div class="strip-status" id="mix-headphone-host-status" aria-live="polite"></div>
+          <div class="mixer-card-controls">
+            <strong>Headphone Mix · Host 11-12</strong>
+            <p>Capture-validated levels only.</p>
+            <div class="mixer-levels"><button data-mix-bus="headphone-mix" data-mix-source="host-11-12" data-mix-level="-60" class="secondary">−60 dB</button><button data-mix-bus="headphone-mix" data-mix-source="host-11-12" data-mix-level="-12" class="secondary">−12 dB</button></div>
+            <div class="strip-status" id="mix-headphone-host-status" aria-live="polite"></div>
+          </div>
+          <div class="pair-meter" aria-label="Headphone Mix Host 11-12 stereo-pair meter"><span class="meter-lane"><span id="meter-headphone-host" class="meter-fill"></span><span id="meter-headphone-host-peak" class="meter-peak" aria-hidden="true"></span></span></div>
         </article>
         <article class="mixer-card">
-          <strong>Main 1-2 · Line In 5-6</strong>
-          <p>Capture-validated levels only.</p>
-          <div class="mixer-levels"><button data-mix-bus="main-1-2" data-mix-source="line-in-5-6" data-mix-level="-60" class="secondary">−60 dB</button><button data-mix-bus="main-1-2" data-mix-source="line-in-5-6" data-mix-level="-12" class="secondary">−12 dB</button></div>
-          <div class="pair-meter" aria-label="Main 1-2 Line In 5-6 stereo-pair meter"><span class="meter-lane"><span id="meter-main-line" class="meter-fill"></span></span></div>
-          <div class="strip-status" id="mix-main-line-status" aria-live="polite"></div>
+          <div class="mixer-card-controls">
+            <strong id="mix-main-line-title">Main 1-2 · Line In 5 / Line In 6</strong>
+            <p>Capture-validated levels only.</p>
+            <div class="mixer-levels"><button data-mix-bus="main-1-2" data-mix-source="line-in-5-6" data-mix-level="-60" class="secondary">−60 dB</button><button data-mix-bus="main-1-2" data-mix-source="line-in-5-6" data-mix-level="-12" class="secondary">−12 dB</button></div>
+            <div class="strip-status" id="mix-main-line-status" aria-live="polite"></div>
+          </div>
+          <div id="meter-main-line-container" class="pair-meter" aria-label="Main 1-2 Line In 5 / Line In 6 stereo-pair meter"><span class="meter-lane"><span id="meter-main-line" class="meter-fill"></span><span id="meter-main-line-peak" class="meter-peak" aria-hidden="true"></span></span></div>
         </article>
       </div>
-      <details class="meter-feed" id="allMeters"><summary>All captured meter channels (source-labelled where mapped; raw, uncalibrated)</summary><div class="meter-groups" id="meterGroups"></div></details>
+      <details class="meter-feed" id="allMeters"><summary>All captured meter channels (source-labelled where mapped)</summary><div class="meter-groups" id="meterGroups"></div></details>
       <div class="meter-mapping-tools"><button id="captureMeterBaseline" class="secondary">Capture meter baseline</button><button id="compareMeterBaseline" class="secondary" disabled>Compare to baseline</button><span class="strip-status" id="meterMappingStatus" aria-live="polite">Read-only mapping helper</span></div>
       <pre class="meter-mapping-result" id="meterMappingResult">Capture a baseline, introduce one known source or change one fader, then compare. No hardware write is sent by this helper.</pre>
     </section>
@@ -299,12 +328,33 @@
     const $ = (id) => document.getElementById(id);
     const qs = (params) => new URLSearchParams(params).toString();
     const preampPath = '/datastore/ext/ibank/0';
+    const lineInputPath = '/datastore/ext/ibank/1';
+    const lineOutputPath = '/datastore/ext/obank/0';
+    const meterDbPerStep = 0.5;
+    const meterScalePoints = [
+      { db: -127, percent: 0, label: '−∞' },
+      { db: -48, percent: 14.2857, label: '−48' },
+      { db: -36, percent: 28.5714, label: '−36' },
+      { db: -24, percent: 42.8571, label: '−24' },
+      { db: -12, percent: 57.1429, label: '−12' },
+      { db: -6, percent: 71.4286, label: '−6' },
+      { db: -3, percent: 85.7143, label: '−3' },
+      { db: 0, percent: 100, label: 'clip' }
+    ];
     const sessionToken = '__SESSION_TOKEN__';
     const pendingWrites = new Set();
     let preampCount = 0;
+    let lineInputCount = 0;
+    let lineInputChannels = [];
     let outputCount = 0;
+    let lineOutputLabelData = {};
+    let lineOutputMeterPaths = [];
     let headphoneCount = 0;
+    let headphoneMeterPaths = [];
     let preampRefreshInFlight = false;
+    let lineInputGainRefreshInFlight = false;
+    let lineInputRefreshInFlight = false;
+    let lineInputPhaseWritePending = false;
     let outputRefreshInFlight = false;
     let outputWritePending = false;
     let headphoneWritePending = false;
@@ -319,7 +369,11 @@
       });
       if (updateHash) history.replaceState(null, '', `#${activeTab.dataset.tab}`);
       if (focusTab) activeTab.focus();
-      if (activeTab.dataset.tab === 'mixer') loadMeters();
+      if (activeTab.dataset.tab === 'mixer') {
+        loadMeterLabels();
+      }
+      loadMeters();
+      if (activeTab.dataset.tab === 'inputs') loadLineInputs({ quiet: lineInputCount > 0 });
       if (activeTab.dataset.tab === 'outputs') loadOutputs({ quiet: outputCount > 0 || headphoneCount > 0 });
     }
     function handleTabKeydown(event) {
@@ -400,7 +454,19 @@
     function syncPreampText(index, field, value) {
       const path = preampFieldPath(index, field);
       const input = $(`mic-${index}-${field}`);
-      if (input && canSyncField(input, path)) input.value = value;
+      if (input && canSyncField(input, path)) {
+        input.value = value;
+        if (field === 'name') {
+          syncChannelName({
+            buttonId: `mic-${index}-label`,
+            editorId: `mic-${index}-name`,
+            meterId: `mic-${index}-meter`,
+            path,
+            value,
+            fallback: `Mic / Inst ${index + 1}`
+          });
+        }
+      }
     }
     function syncPreampGain(index, value) {
       const path = preampFieldPath(index, 'trim');
@@ -412,6 +478,10 @@
     function canSyncField(input, path) {
       return !pendingWrites.has(path) && document.activeElement !== input && !input.matches(':active');
     }
+    function channelDisplayLabel(value, fallback) {
+      const label = String(value ?? '');
+      return label.trim() ? label : fallback;
+    }
     function preampMarkup(index, data) {
       const key = (field) => `ch/${index}/${field}`;
       const gain = Number(data[key('trim')] ?? 0);
@@ -419,21 +489,28 @@
       const min = Number.isFinite(range[0]) ? range[0] : 0;
       const max = Number.isFinite(range[1]) ? range[1] : 74;
       const name = data[key('name')] || '';
+      const label = channelDisplayLabel(name, `Mic / Inst ${index + 1}`);
       return `<article class="strip">
-        <div class="strip-head"><strong>Mic ${index + 1}</strong><output class="gain-value" id="mic-${index}-gain-value">${gain} dB</output></div>
-        <label class="strip-name">Name<input id="mic-${index}-name" value="${escapeHtml(name)}" placeholder="Mic ${index + 1}" spellcheck="false"></label>
-        <label>Gain<input id="mic-${index}-gain" type="range" min="${min}" max="${max}" step="1" value="${gain}"></label>
+        <div class="strip-head">
+          <button id="mic-${index}-label" class="channel-name-button" type="button" title="Click to rename">${escapeHtml(label)}</button>
+          <input id="mic-${index}-name" class="channel-name-editor" value="${escapeHtml(name)}" placeholder="Mic / Inst ${index + 1}" aria-label="Channel name" spellcheck="false" hidden>
+        </div>
+        <div class="strip-channel-body">
+          <label class="gain-control"><span class="control-kicker">Gain</span><output class="gain-value" id="mic-${index}-gain-value">${gain} dB</output><input id="mic-${index}-gain" class="gain-fader" type="range" orient="vertical" min="${min}" max="${max}" step="1" value="${gain}"></label>
+          <div class="meter-control"><span class="control-kicker">Level</span><div class="channel-meter" aria-label="${escapeHtml(label)} signal meter">${meterLaneMarkup(`mic-${index}-meter`)}${meterScaleMarkup()}</div></div>
+        </div>
         <div class="switches">
           ${switchMarkup(index, '48V', '48 V', data[key('48V')])}
-          ${switchMarkup(index, 'pad', 'Pad', data[key('pad')])}
-          ${switchMarkup(index, 'phase', 'Polarity', data[key('phase')])}
+          ${switchMarkup(index, 'pad', 'PAD', data[key('pad')], 'Pad')}
+          ${switchMarkup(index, 'phase', 'Ø', data[key('phase')], 'Polarity')}
         </div>
         <div class="strip-status" id="mic-${index}-status" aria-live="polite"></div>
       </article>`;
     }
-    function switchMarkup(index, field, label, value) {
+    function switchMarkup(index, field, label, value, accessibleLabel = label) {
       const checked = Number(value) ? ' checked' : '';
-      return `<label class="switch"><input id="mic-${index}-${field}" type="checkbox"${checked}><span>${label}</span></label>`;
+      const labelClass = accessibleLabel === 'Polarity' ? ' polarity' : '';
+      return `<label class="switch"><input id="mic-${index}-${field}" type="checkbox" aria-label="${escapeHtml(accessibleLabel)}"${checked}><span class="switch-face"><span class="switch-label${labelClass}">${escapeHtml(label)}</span></span></label>`;
     }
     function preampFieldPath(index, field) {
       return `${preampPath}/ch/${index}/${field}`;
@@ -449,30 +526,239 @@
         saveGain(gain.value);
       });
       gain.addEventListener('change', () => saveGain.flush(gain.value));
-      $(`mic-${index}-name`).addEventListener('change', (event) => writeDatastore(path('name'), event.target.value, status));
+      bindPreampNameEditor(index, path('name'), status);
       for (const field of ['48V', 'pad', 'phase']) {
         $(`mic-${index}-${field}`).addEventListener('change', (event) => writeDatastore(path(field), event.target.checked ? '1' : '0', status));
       }
     }
+    function bindPreampNameEditor(index, path, status) {
+      bindChannelNameEditor({
+        buttonId: `mic-${index}-label`,
+        editorId: `mic-${index}-name`,
+        meterId: `mic-${index}-meter`,
+        path,
+        status,
+        fallback: `Mic / Inst ${index + 1}`
+      });
+    }
+    function bindChannelNameEditor({ buttonId, editorId, meterId, path, status, fallback }) {
+      const button = $(buttonId);
+      const editor = $(editorId);
+      const finish = (save) => {
+        if (editor.hidden) return;
+        const original = editor.dataset.original ?? '';
+        if (!save) editor.value = original;
+        const label = channelDisplayLabel(editor.value, fallback);
+        button.textContent = label;
+        $(meterId)?.closest('.channel-meter')?.setAttribute('aria-label', `${label} signal meter`);
+        editor.hidden = true;
+        button.hidden = false;
+        if (save && editor.value !== original) writeDatastore(path, editor.value, status);
+      };
+      button.addEventListener('click', () => {
+        editor.dataset.original = editor.value;
+        button.hidden = true;
+        editor.hidden = false;
+        editor.focus();
+        editor.select();
+      });
+      editor.addEventListener('blur', () => finish(editor.dataset.cancelled !== 'true'));
+      editor.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          editor.dataset.cancelled = 'false';
+          editor.blur();
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          editor.dataset.cancelled = 'true';
+          editor.blur();
+        }
+      });
+      editor.addEventListener('focus', () => { editor.dataset.cancelled = 'false'; });
+    }
+    function syncChannelName({ buttonId, editorId, meterId, path, value, fallback }) {
+      const editor = $(editorId);
+      if (!editor || !canSyncField(editor, path)) return;
+      editor.value = value;
+      const label = channelDisplayLabel(value, fallback);
+      $(buttonId).textContent = label;
+      $(meterId)?.closest('.channel-meter')?.setAttribute('aria-label', `${label} signal meter`);
+    }
+    async function loadLineInputs({ quiet = false } = {}) {
+      if (lineInputRefreshInFlight || lineInputPhaseWritePending || outputRefreshInFlight || outputWritePending || headphoneWritePending) return;
+      lineInputRefreshInFlight = true;
+      if (lineInputCount) setLineInputPhaseControlsDisabled(true);
+      if (!quiet && !lineInputCount) $('lineInputOut').innerHTML = '<div class="empty">Loading...</div>';
+      try {
+        const json = await fetchJson('/api/inputs/lines?' + qs({ host: $('host').value }));
+        const inputs = Array.isArray(json.inputs) ? json.inputs : [];
+        if (inputs.length) {
+          const channels = inputs.map((input, index) => Number(input.channel_index ?? index));
+          const inventoryChanged = channels.length !== lineInputChannels.length || channels.some((channel, index) => channel !== lineInputChannels[index]);
+          lineInputChannels = channels;
+          if (inputs.length !== lineInputCount || inventoryChanged || !$('lineInputOut').querySelector('.strip')) {
+            $('lineInputOut').innerHTML = inputs.map((input, index) => lineInputMarkup(index, input)).join('');
+            lineInputCount = inputs.length;
+            inputs.forEach((_, index) => bindLineInput(index));
+          } else {
+            inputs.forEach((input, index) => syncLineInput(index, input));
+          }
+        } else {
+          lineInputCount = 0;
+          lineInputChannels = [];
+          $('lineInputOut').innerHTML = '<div class="empty">No line-input controls advertised by this device.</div>';
+        }
+      } catch (err) {
+        if (!quiet || !lineInputCount) {
+          $('lineInputOut').innerHTML = `<div class="empty">${escapeHtml(err.message)}</div>`;
+          show({ error: err.message });
+        }
+      } finally {
+        lineInputRefreshInFlight = false;
+        if (!lineInputPhaseWritePending) setLineInputPhaseControlsDisabled(false);
+        loadLineInputGains({ quiet: true });
+      }
+    }
+    async function loadLineInputGains({ quiet = false } = {}) {
+      if (lineInputGainRefreshInFlight || !lineInputCount) return;
+      lineInputGainRefreshInFlight = true;
+      try {
+        const json = await fetchJson('/api/get?' + qs({ host: $('host').value, path: lineInputPath }));
+        const data = JSON.parse(json.body);
+        const maxChannel = Math.max(...lineInputChannels, -1);
+        if (Number(data.maxCh || 0) <= maxChannel) throw new Error('The Analog input bank does not match the discovered line inputs.');
+        for (let index = 0; index < lineInputCount; index += 1) {
+          const channel = lineInputChannels[index] ?? index;
+          syncLineInputLabel(index, data[`ch/${channel}/name`] || '');
+          syncLineInputGain(index, Number(data[`ch/${channel}/trim`] ?? 0));
+        }
+      } catch (err) {
+        if (!quiet) show({ error: err.message });
+      } finally {
+        lineInputGainRefreshInFlight = false;
+      }
+    }
+    function lineInputMarkup(index, input) {
+      const gain = Number(input.gain_db ?? 0);
+      const checked = input.phase ? ' checked' : '';
+      const number = Number(input.number ?? index + 5);
+      return `<article class="strip">
+        <div class="strip-head">
+          <button id="line-in-${index}-label" class="channel-name-button" type="button" title="Click to rename">Line In ${number}</button>
+          <input id="line-in-${index}-name" class="channel-name-editor" value="" placeholder="Line In ${number}" aria-label="Channel name" spellcheck="false" hidden>
+        </div>
+        <div class="strip-channel-body">
+          <label class="gain-control"><span class="control-kicker">Gain</span><output class="gain-value" id="line-in-${index}-gain-value">${gain} dB</output><input id="line-in-${index}-gain" class="gain-fader" type="range" orient="vertical" min="0" max="20" step="1" value="${gain}"></label>
+          <div class="meter-control"><span class="control-kicker">Level</span><div class="channel-meter" aria-label="Line In ${number} signal meter">${meterLaneMarkup(`line-in-${index}-meter`)}${meterScaleMarkup()}</div></div>
+        </div>
+        <div class="switches line-input-switches">
+          <label class="switch"><input id="line-in-${index}-phase" type="checkbox" aria-label="Polarity"${checked}><span class="switch-face"><span class="switch-label polarity">Ø</span></span></label>
+        </div>
+        <div class="strip-status" id="line-in-${index}-status" aria-live="polite"></div>
+      </article>`;
+    }
+    function bindLineInput(index) {
+      const gain = $(`line-in-${index}-gain`);
+      const status = $(`line-in-${index}-status`);
+      const saveGain = debounce((value) => writeDatastore(lineInputFieldPath(index, 'trim'), value, status), 180);
+      gain.addEventListener('input', () => {
+        $(`line-in-${index}-gain-value`).textContent = `${gain.value} dB`;
+        saveGain(gain.value);
+      });
+      gain.addEventListener('change', () => saveGain.flush(gain.value));
+      const channel = lineInputChannels[index] ?? index;
+      bindChannelNameEditor({
+        buttonId: `line-in-${index}-label`,
+        editorId: `line-in-${index}-name`,
+        meterId: `line-in-${index}-meter`,
+        path: lineInputFieldPath(index, 'name'),
+        status,
+        fallback: `Line In ${channel + 5}`
+      });
+      $(`line-in-${index}-phase`).addEventListener('change', event => writeLineInputPhase(index, event.target.checked));
+    }
+    function syncLineInput(index, input) {
+      const phase = $(`line-in-${index}-phase`);
+      if (phase && document.activeElement !== phase && !phase.matches(':active')) phase.checked = Boolean(input.phase);
+    }
+    function syncLineInputGain(index, value) {
+      const path = lineInputFieldPath(index, 'trim');
+      const gain = $(`line-in-${index}-gain`);
+      if (!gain || !canSyncField(gain, path)) return;
+      gain.value = value;
+      $(`line-in-${index}-gain-value`).textContent = `${gain.value} dB`;
+    }
+    function syncLineInputLabel(index, value) {
+      const channel = lineInputChannels[index] ?? index;
+      syncChannelName({
+        buttonId: `line-in-${index}-label`,
+        editorId: `line-in-${index}-name`,
+        meterId: `line-in-${index}-meter`,
+        path: lineInputFieldPath(index, 'name'),
+        value,
+        fallback: `Line In ${channel + 5}`
+      });
+    }
+    function lineInputFieldPath(index, field) {
+      return `${lineInputPath}/ch/${lineInputChannels[index] ?? index}/${field}`;
+    }
+    function setLineInputPhaseControlsDisabled(disabled) {
+      document.querySelectorAll('[id^="line-in-"][id$="-phase"]').forEach(input => { input.disabled = disabled; });
+    }
+    async function writeLineInputPhase(index, enabled) {
+      if (lineInputPhaseWritePending || lineInputRefreshInFlight || outputRefreshInFlight || outputWritePending || headphoneWritePending) return;
+      lineInputPhaseWritePending = true;
+      const status = $(`line-in-${index}-status`);
+      setStripStatus(status, 'Saving...', 'pending');
+      setLineInputPhaseControlsDisabled(true);
+      try {
+        const json = await fetchJson('/api/inputs/line-phase', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: qs({ host: $('host').value, input: index, enabled: enabled ? '1' : '0', token: sessionToken })
+        });
+        setStripStatus(status, 'Saved', 'saved');
+        show(json.body ?? json);
+      } catch (err) {
+        setStripStatus(status, 'Save failed', 'error');
+        show({ error: err.message });
+      } finally {
+        lineInputPhaseWritePending = false;
+        setLineInputPhaseControlsDisabled(false);
+        loadLineInputs({ quiet: true });
+      }
+    }
     async function loadOutputs({ quiet = false } = {}) {
-      if (outputRefreshInFlight || outputWritePending || headphoneWritePending) return;
+      if (outputRefreshInFlight || outputWritePending || headphoneWritePending || lineInputRefreshInFlight || lineInputPhaseWritePending) return;
       outputRefreshInFlight = true;
       if (!quiet && !outputCount) $('outputOut').innerHTML = '<div class="empty">Loading...</div>';
       if (!quiet && !headphoneCount) $('phoneOut').innerHTML = '<div class="empty">Loading...</div>';
       try {
         const json = await fetchJson('/api/outputs?' + qs({ host: $('host').value }));
+        try {
+          const labelResponse = await fetchJson('/api/get?' + qs({ host: $('host').value, path: lineOutputPath }));
+          lineOutputLabelData = JSON.parse(labelResponse.body);
+        } catch (err) {
+          // Keep the last known labels if the compatibility bank is
+          // temporarily unavailable; trim remains independently usable.
+        }
+        const labelData = lineOutputLabelData;
         const lineOutputs = Array.isArray(json.line_outputs) ? json.line_outputs : [];
         const headphoneOutputs = Array.isArray(json.headphone_outputs) ? json.headphone_outputs : [];
+        lineOutputMeterPaths = lineOutputs.map(output => output.meter_path || null);
+        headphoneMeterPaths = headphoneOutputs.map(output => output.meter_path || null);
         if (lineOutputs.length) {
           if (lineOutputs.length !== outputCount || !$('outputOut').querySelector('.strip')) {
-            $('outputOut').innerHTML = lineOutputs.map((output, index) => outputMarkup(index, output)).join('');
+            $('outputOut').innerHTML = lineOutputs.map((output, index) => outputMarkup(index, output, labelData)).join('');
             outputCount = lineOutputs.length;
-            lineOutputs.forEach((_, index) => bindOutput(index));
+            lineOutputs.forEach((output, index) => bindOutput(index, output));
           } else {
-            lineOutputs.forEach((output, index) => syncOutput(index, output));
+            lineOutputs.forEach((output, index) => syncOutput(index, output, labelData));
           }
         } else {
           outputCount = 0;
+          lineOutputMeterPaths = [];
           $('outputOut').innerHTML = '<div class="empty">No line-output trims advertised by this device.</div>';
         }
         if (headphoneOutputs.length) {
@@ -485,6 +771,7 @@
           }
         } else {
           headphoneCount = 0;
+          headphoneMeterPaths = [];
           $('phoneOut').innerHTML = '<div class="empty">No headphone outputs advertised by this device.</div>';
         }
       } catch (err) {
@@ -499,26 +786,52 @@
         outputRefreshInFlight = false;
       }
     }
-    function outputMarkup(index, output) {
+    function outputMarkup(index, output, labelData) {
       const gain = outputSliderValue(output.attenuation);
       const label = outputGainLabel(gain);
+      const fallback = lineOutputFallback(index, output);
+      const nameValue = lineOutputNameValue(index, output, labelData);
+      const name = channelDisplayLabel(nameValue, fallback);
       return `<article class="strip">
-        <div class="strip-head"><strong>Line Out ${Number(output.number ?? index + 1)}</strong><output class="gain-value" id="out-${index}-gain-value">${label}</output></div>
-        <label>Gain<input id="out-${index}-gain" type="range" min="-100" max="0" step="1" value="${gain}" aria-valuetext="${label}"></label>
+        <div class="strip-head">
+          <button id="out-${index}-label" class="channel-name-button" type="button" title="Click to rename">${escapeHtml(name)}</button>
+          <input id="out-${index}-name" class="channel-name-editor" value="${escapeHtml(nameValue)}" placeholder="${escapeHtml(fallback)}" aria-label="Channel name" spellcheck="false" hidden>
+        </div>
+        <div class="strip-channel-body">
+          <label class="gain-control"><span class="control-kicker">Gain</span><output class="gain-value" id="out-${index}-gain-value">${label}</output><input id="out-${index}-gain" class="gain-fader" type="range" orient="vertical" min="-100" max="0" step="1" value="${gain}" aria-valuetext="${label}"></label>
+          <div class="meter-control"><span class="control-kicker">Level</span><div class="channel-meter" aria-label="${escapeHtml(name)} signal meter">${meterLaneMarkup(`out-${index}-meter`)}${meterScaleMarkup()}</div></div>
+        </div>
         <div class="strip-status" id="out-${index}-status" aria-live="polite"></div>
       </article>`;
     }
-    function bindOutput(index) {
+    function bindOutput(index, output) {
       const gain = $(`out-${index}-gain`);
       const gainValue = $(`out-${index}-gain-value`);
+      const status = $(`out-${index}-status`);
       gain.addEventListener('input', () => {
         const label = outputGainLabel(gain.value);
         gainValue.textContent = label;
         gain.setAttribute('aria-valuetext', label);
       });
-      gain.addEventListener('change', () => writeLineOutputTrim(index, gain.value, $(`out-${index}-status`)));
+      gain.addEventListener('change', () => writeLineOutputTrim(index, gain.value, status));
+      bindChannelNameEditor({
+        buttonId: `out-${index}-label`,
+        editorId: `out-${index}-name`,
+        meterId: `out-${index}-meter`,
+        path: lineOutputFieldPath(index, output, 'name'),
+        status,
+        fallback: lineOutputFallback(index, output)
+      });
     }
-    function syncOutput(index, output) {
+    function syncOutput(index, output, labelData) {
+      syncChannelName({
+        buttonId: `out-${index}-label`,
+        editorId: `out-${index}-name`,
+        meterId: `out-${index}-meter`,
+        path: lineOutputFieldPath(index, output, 'name'),
+        value: lineOutputNameValue(index, output, labelData),
+        fallback: lineOutputFallback(index, output)
+      });
       const input = $(`out-${index}-gain`);
       if (!input || document.activeElement === input || input.matches(':active')) return;
       const gain = outputSliderValue(output.attenuation);
@@ -527,8 +840,21 @@
       input.setAttribute('aria-valuetext', label);
       $(`out-${index}-gain-value`).textContent = label;
     }
+    function lineOutputChannel(index, output) {
+      return Number(output.channel_index ?? index);
+    }
+    function lineOutputFallback(index, output) {
+      const channel = lineOutputChannel(index, output);
+      return `Line Out ${Number(output.number ?? channel + 1)}`;
+    }
+    function lineOutputNameValue(index, output, labelData) {
+      return labelData?.[`ch/${lineOutputChannel(index, output)}/name`] || '';
+    }
+    function lineOutputFieldPath(index, output, field) {
+      return `${lineOutputPath}/ch/${lineOutputChannel(index, output)}/${field}`;
+    }
     async function writeLineOutputTrim(index, trimDb, status) {
-      if (outputWritePending || headphoneWritePending) return;
+      if (outputWritePending || headphoneWritePending || lineInputRefreshInFlight || lineInputPhaseWritePending) return;
       outputWritePending = true;
       setStripStatus(status, 'Saving...', 'pending');
       document.querySelectorAll('[id^="out-"][id$="-gain"]').forEach(input => { input.disabled = true; });
@@ -554,8 +880,15 @@
       const right = headphoneSliderValue(output, 1);
       const label = headphonePairLabel(left, right);
       return `<article class="strip">
-        <div class="strip-head"><strong>Phones ${index + 1}</strong><output class="gain-value" id="phone-${index}-gain-value">${label}</output></div>
-        <label>Gain<input id="phone-${index}-gain" type="range" min="-100" max="0" step="1" value="${left}" aria-valuetext="${outputGainLabel(left)}"></label>
+        <div class="strip-head"><strong>Phones ${index + 1}</strong></div>
+        <div class="strip-channel-body">
+          <label class="gain-control"><span class="control-kicker">Gain</span><output class="gain-value" id="phone-${index}-gain-value">${label}</output><input id="phone-${index}-gain" class="gain-fader" type="range" orient="vertical" min="-100" max="0" step="1" value="${left}" aria-valuetext="${outputGainLabel(left)}"></label>
+          <div class="meter-control"><span class="control-kicker">Level</span><div class="channel-meter stereo-channel-meter" aria-label="Phones ${index + 1} stereo signal meter">
+            <span class="vertical-meter-column">${meterLaneMarkup(`phone-${index}-meter-l`)}<span class="vertical-meter-label">L</span></span>
+            <span class="vertical-meter-column">${meterLaneMarkup(`phone-${index}-meter-r`)}<span class="vertical-meter-label">R</span></span>
+            ${meterScaleMarkup()}
+          </div></div>
+        </div>
         <div class="strip-status" id="phone-${index}-status" aria-live="polite"></div>
       </article>`;
     }
@@ -592,7 +925,7 @@
       $(`phone-${index}-gain-value`).textContent = headphonePairLabel(left, right);
     }
     async function writeHeadphoneTrim(index, trimDb, status) {
-      if (headphoneWritePending || outputWritePending) return;
+      if (headphoneWritePending || outputWritePending || lineInputRefreshInFlight || lineInputPhaseWritePending) return;
       headphoneWritePending = true;
       setStripStatus(status, 'Saving...', 'pending');
       document.querySelectorAll('[id^="phone-"][id$="-gain"]').forEach(input => { input.disabled = true; });
@@ -659,37 +992,136 @@
         pendingWrites.delete(path);
       }
     }
-    let meterRefreshInFlight = false;
+    let meterEventSource = null;
+    let meterEventHost = '';
+    let pendingMeterSnapshot = null;
+    let meterRenderFrame = 0;
     let mixInputPairLabels = [];
+    let micInputPairLabels = [];
     let lastMeterRecords = [];
     let meterBaseline = null;
+    const meterPeakHoldMs = 1000;
+    const meterPeakStates = new Map();
     function meterDb(value) {
-      if (value === null || value === undefined || value === 0xffff) return null;
-      return -value / 256;
+      if (value === null || value === undefined || value === 0xff) return null;
+      return -Number(value) * meterDbPerStep;
+    }
+    function formatMeterDb(db) {
+      return Number.isInteger(db) ? db.toFixed(0) : db.toFixed(1);
     }
     function meterPercent(value) {
       const db = meterDb(value);
       if (db === null) return 0;
-      return Math.max(0, Math.min(100, ((db + 144) * 100) / 144));
+      if (db <= meterScalePoints[0].db) return meterScalePoints[0].percent;
+      for (let index = 1; index < meterScalePoints.length; index += 1) {
+        const right = meterScalePoints[index];
+        if (db > right.db) continue;
+        const left = meterScalePoints[index - 1];
+        const ratio = (db - left.db) / (right.db - left.db);
+        return left.percent + ratio * (right.percent - left.percent);
+      }
+      return 100;
+    }
+    function meterScaleMarkup() {
+      return `<span class="meter-scale" aria-hidden="true">${meterScalePoints.map((point, index) => {
+        const edge = index === 0 ? ' first' : index === meterScalePoints.length - 1 ? ' last' : '';
+        return `<span class="meter-mark${edge}" style="bottom:${point.percent}%">${point.label}</span>`;
+      }).join('')}</span>`;
+    }
+    function meterLaneMarkup(id) {
+      return `<span class="meter-lane"><span id="${id}" class="meter-fill"></span><span id="${id}-peak" class="meter-peak" aria-hidden="true"></span></span>`;
     }
     function meterText(value) {
+      if (value === null || value === undefined) return 'Meter unavailable';
       const db = meterDb(value);
-      return db === null ? 'Silence / no meter sample' : `${db.toFixed(1)} dBFS (raw ${value})`;
+      return db === null ? '−∞ dBFS' : `${formatMeterDb(db)} dBFS (raw ${value})`;
     }
     function meterLabel(value) {
+      if (value === null || value === undefined) return 'Unavailable';
       const db = meterDb(value);
-      return db === null ? '−∞ dBFS' : `${db.toFixed(1)} dBFS`;
+      return db === null ? '−∞ dBFS' : `${formatMeterDb(db)} dBFS`;
+    }
+    function meterWordChannels(value) {
+      if (value === null || value === undefined) return [null, null];
+      const word = Number(value) & 0xffff;
+      return [(word >>> 8) & 0xff, word & 0xff];
+    }
+    function louderMeterChannel(value) {
+      const active = meterWordChannels(value).filter(channel => channel !== null && channel !== 0xff);
+      return active.length ? Math.min(...active) : 0xff;
+    }
+    function meterWordText(value) {
+      const [left, right] = meterWordChannels(value);
+      return `L ${meterText(left)} / R ${meterText(right)} (raw ${value ?? 'none'})`;
+    }
+    function meterWordLabel(value) {
+      const [left, right] = meterWordChannels(value);
+      return `L ${meterLabel(left)} / R ${meterLabel(right)}`;
+    }
+    function renderChannelMeter(id, value) {
+      const fill = $(id);
+      if (!fill) return;
+      const percent = meterPercent(value);
+      fill.style.height = `${percent}%`;
+      fill.title = meterText(value);
+      renderMeterPeak(id, value, percent);
+    }
+    function renderMeterPeak(id, value, percent) {
+      const peak = $(`${id}-peak`);
+      if (!peak) return;
+      const now = performance.now();
+      const active = meterDb(value) !== null;
+      let state = meterPeakStates.get(id);
+      if (!active) {
+        if (!state || now >= state.holdUntil) {
+          meterPeakStates.delete(id);
+          peak.style.opacity = '0';
+        }
+        return;
+      }
+      if (!state || percent >= state.percent || now >= state.holdUntil) {
+        state = { percent, value, holdUntil: now + meterPeakHoldMs };
+        meterPeakStates.set(id, state);
+      }
+      peak.style.bottom = `${Math.min(99.5, Math.max(0.5, state.percent))}%`;
+      peak.style.opacity = '1';
+    }
+    function meterChannelAtPath(records, path, offset = 0) {
+      if (!path) return null;
+      const record = records.find(item => item.property_id === path.property_id && Number(item.index) === Number(path.record_index));
+      if (!record) return null;
+      const channel = Number(path.channel_index) + offset;
+      if (record.channels?.[channel] !== undefined) return Number(record.channels[channel]);
+      const word = record.values?.[Math.floor(channel / 2)];
+      if (word === undefined) return null;
+      const channels = meterWordChannels(word);
+      return channels[channel % 2];
+    }
+    function renderControlMeters(records) {
+      for (let index = 0; index < preampCount; index += 1) {
+        renderChannelMeter(`mic-${index}-meter`, meterChannelAtPath(records, { property_id: '138c', record_index: 0, channel_index: index }));
+      }
+      for (let index = 0; index < lineInputCount; index += 1) {
+        renderChannelMeter(`line-in-${index}-meter`, meterChannelAtPath(records, { property_id: '13ac', record_index: 0, channel_index: lineInputChannels[index] ?? index }));
+      }
+      lineOutputMeterPaths.forEach((path, index) => {
+        renderChannelMeter(`out-${index}-meter`, meterChannelAtPath(records, path));
+      });
+      headphoneMeterPaths.forEach((path, index) => {
+        renderChannelMeter(`phone-${index}-meter-l`, meterChannelAtPath(records, path));
+        renderChannelMeter(`phone-${index}-meter-r`, meterChannelAtPath(records, path, 1));
+      });
     }
     function renderPairMeter(prefix, value) {
       const fill = $(`meter-${prefix}`);
       if (!fill) return;
-      fill.style.width = `${meterPercent(value)}%`;
-      fill.title = meterText(value);
+      renderChannelMeter(`meter-${prefix}`, louderMeterChannel(value));
+      fill.title = meterWordText(value);
     }
     function meterChannelName(record, slot) {
       if (record.property_id === '13ad' && record.index === 0) return mixInputPairLabels[slot] || `Mix In pair ${slot + 1}`;
-      if (record.property_id === '138c' && record.index === 0) return `Mic / Inst ${slot * 2 + 1}–${slot * 2 + 2}`;
-      if (record.property_id === '13ad' && (record.index === 32 || record.index === 64) && slot === 6) return 'Mic / Inst 1–2 (mirrored stage)';
+      if (record.property_id === '138c' && record.index === 0) return micInputPairLabels[slot] || `Mic / Inst ${slot * 2 + 1} / Mic / Inst ${slot * 2 + 2}`;
+      if (record.property_id === '13ad' && (record.index === 32 || record.index === 64) && slot === 6) return `${micInputPairLabels[0] || 'Mic / Inst 1 / Mic / Inst 2'} (mirrored stage)`;
       return `Slot ${slot + 1}`;
     }
     function renderAllMeters(records) {
@@ -698,7 +1130,7 @@
         const title = record.property_id === '13ad' && record.index === 0 ? 'Mix In · 32 stereo pairs (64 channels)' : `0x${record.property_id} · bank ${record.index}`;
         const channels = record.values.map((value, slot) => {
           const name = meterChannelName(record, slot);
-          return `<div class="meter-channel" title="${escapeHtml(name)} · ${meterText(value)}"><span class="meter-channel-name">${escapeHtml(name)} · ${meterLabel(value)}</span><span class="meter-lane"><span class="meter-fill" style="width:${meterPercent(value)}%"></span></span></div>`;
+          return `<div class="meter-channel" title="${escapeHtml(name)} · ${meterWordText(value)}"><span class="meter-channel-name">${escapeHtml(name)} · ${meterWordLabel(value)}</span><span class="meter-lane"><span class="meter-fill" style="height:${meterPercent(louderMeterChannel(value))}%"></span></span>${meterScaleMarkup()}</div>`;
         }).join('');
         return `<div class="meter-group"><strong>${escapeHtml(title)}</strong><div class="meter-values">${channels}</div></div>`;
       }).join('');
@@ -719,14 +1151,32 @@
           const [rightBank, rightChannel] = sources[slot * 2 + 1].split(':');
           const data = banks.get(leftBank);
           if (!data || leftBank !== rightBank || leftChannel === undefined || rightChannel === undefined) return `Mix In pair ${slot + 1}`;
-          const left = Number(leftChannel) + 1;
-          const right = Number(rightChannel) + 1;
-          return `${data.name || `Bank ${leftBank}`} ${left}–${right}`;
+          return inputPairDisplayLabel(leftBank, leftChannel, rightChannel, data);
         });
+        const micBank = banks.get('0');
+        micInputPairLabels = micBank
+          ? [inputPairDisplayLabel('0', 0, 1, micBank), inputPairDisplayLabel('0', 2, 3, micBank)]
+          : [];
+        const mainLineLabel = mixInputPairLabels[10] || 'Line In 5 / Line In 6';
+        $('mix-main-line-title').textContent = `Main 1-2 · ${mainLineLabel}`;
+        $('meter-main-line-container').setAttribute('aria-label', `Main 1-2 ${mainLineLabel} stereo-pair meter`);
         renderAllMeters(lastMeterRecords);
       } catch (err) {
         mixInputPairLabels = [];
+        micInputPairLabels = [];
       }
+    }
+    function inputPairDisplayLabel(bank, leftChannel, rightChannel, data) {
+      const left = inputChannelDisplayLabel(bank, Number(leftChannel), data);
+      const right = inputChannelDisplayLabel(bank, Number(rightChannel), data);
+      return `${left} / ${right}`;
+    }
+    function inputChannelDisplayLabel(bank, channel, data) {
+      let fallback;
+      if (bank === '0') fallback = `Mic / Inst ${channel + 1}`;
+      else if (bank === '1') fallback = `Line In ${channel + 5}`;
+      else fallback = `${data.name || `Bank ${bank}`} ${channel + 1}`;
+      return channelDisplayLabel(data[`ch/${channel}/name`], fallback);
     }
     function captureMeterBaseline() {
       if (!lastMeterRecords.length) {
@@ -751,40 +1201,78 @@
         if (!previous) return;
         record.values.forEach((value, slot) => {
           const before = previous.values[slot];
-          if (before === undefined || Math.abs(value - before) < 256) return;
-          changes.push({
-            group: `${record.property_id}:${record.index}`,
-            channel: meterChannelName(record, slot),
-            slot,
-            before,
-            value,
-            delta: value - before
+          if (before === undefined) return;
+          const beforeChannels = meterWordChannels(before);
+          const currentChannels = meterWordChannels(value);
+          currentChannels.forEach((channelValue, lane) => {
+            const channelBefore = beforeChannels[lane];
+            if (channelBefore === null || channelValue === null || Math.abs(channelValue - channelBefore) < 1) return;
+            changes.push({
+              group: `${record.property_id}:${record.index}`,
+              channel: `${meterChannelName(record, slot)} ${lane ? 'R' : 'L'}`,
+              slot: slot * 2 + lane,
+              before: channelBefore,
+              value: channelValue,
+              delta: channelValue - channelBefore
+            });
           });
         });
       });
       changes.sort((left, right) => Math.abs(right.delta) - Math.abs(left.delta));
       const visible = changes.slice(0, 80);
       $('meterMappingResult').textContent = visible.length
-        ? visible.map(change => `${change.group} · ${change.channel} (slot ${change.slot + 1}): ${meterText(change.before)} → ${meterText(change.value)} (${change.delta >= 0 ? '+' : ''}${change.delta} raw)`).join('\n')
-        : 'No raw meter change of at least 256 was observed. Keep the signal steady, make one larger isolated change, and compare again.';
+        ? visible.map(change => {
+          const attenuationDeltaDb = change.delta * meterDbPerStep;
+          return `${change.group} · ${change.channel} (channel ${change.slot + 1}): ${meterText(change.before)} → ${meterText(change.value)} (${attenuationDeltaDb >= 0 ? '+' : ''}${formatMeterDb(attenuationDeltaDb)} dB attenuation)`;
+        }).join('\n')
+        : 'No meter change of at least 0.5 dB was observed. Keep the signal steady, make one isolated change, and compare again.';
       setStripStatus($('meterMappingStatus'), `${changes.length} changed samples`, changes.length ? 'saved' : '');
     }
-    async function loadMeters() {
-      if (meterRefreshInFlight || outputRefreshInFlight || outputWritePending || headphoneWritePending || document.hidden || $('tab-mixer').getAttribute('aria-selected') !== 'true') return;
-      meterRefreshInFlight = true;
-      try {
-        const meters = await fetchJson('/api/mixer/meters?' + qs({ host: $('host').value }));
-        renderPairMeter('main-host', meters.faders.main_host_11_12);
-        renderPairMeter('headphone-host', meters.faders.headphone_host_11_12);
-        renderPairMeter('main-line', meters.faders.main_line_in_5_6);
-        lastMeterRecords = meters.records || [];
-        renderAllMeters(lastMeterRecords);
-      } catch (err) {
-        // Metering is an optional read-only session; leave the last values in
-        // place while its worker reconnects instead of interrupting controls.
-      } finally {
-        meterRefreshInFlight = false;
+    function renderMeterSnapshot(meters) {
+      if (!Array.isArray(meters.records) || !meters.records.length) return;
+      renderPairMeter('main-host', meters.faders.main_host_11_12);
+      renderPairMeter('headphone-host', meters.faders.headphone_host_11_12);
+      renderPairMeter('main-line', meters.faders.main_line_in_5_6);
+      lastMeterRecords = meters.records || [];
+      renderControlMeters(lastMeterRecords);
+      renderAllMeters(lastMeterRecords);
+    }
+    function queueMeterSnapshot(meters) {
+      pendingMeterSnapshot = meters;
+      if (meterRenderFrame) return;
+      meterRenderFrame = requestAnimationFrame(() => {
+        meterRenderFrame = 0;
+        const snapshot = pendingMeterSnapshot;
+        pendingMeterSnapshot = null;
+        if (snapshot) renderMeterSnapshot(snapshot);
+      });
+    }
+    function stopMeterStream() {
+      if (meterEventSource) meterEventSource.close();
+      meterEventSource = null;
+      meterEventHost = '';
+    }
+    function loadMeters() {
+      const activeMeterTab = ['inputs', 'outputs', 'mixer'].some(tab => $(`tab-${tab}`).getAttribute('aria-selected') === 'true');
+      if (document.hidden || !activeMeterTab) {
+        stopMeterStream();
+        return;
       }
+      const host = $('host').value;
+      if (meterEventSource && meterEventHost === host) return;
+      stopMeterStream();
+      meterEventHost = host;
+      const events = new EventSource('/api/mixer/meters/events?' + qs({ host }));
+      meterEventSource = events;
+      events.addEventListener('meters', event => {
+        if (events !== meterEventSource) return;
+        try {
+          queueMeterSnapshot(JSON.parse(event.data));
+        } catch (err) {
+          // Ignore one malformed event; EventSource keeps the live session and
+          // the next complete snapshot replaces it.
+        }
+      });
     }
     let mixerWritePending = false;
     const mixerButtons = () => document.querySelectorAll('[data-mix-bus]');
@@ -838,10 +1326,15 @@
     $('get').addEventListener('click', readPath);
     $('set').addEventListener('click', setPath);
     $('probe').addEventListener('click', probe);
-    $('loadPreamps').addEventListener('click', loadPreamps);
+    $('loadInputs').addEventListener('click', () => {
+      loadPreamps();
+      loadLineInputGains();
+      loadLineInputs();
+    });
     $('loadOutputs').addEventListener('click', () => loadOutputs());
     document.querySelectorAll('[data-mix-bus]').forEach(button => button.addEventListener('click', () => writeMixerFader(button)));
-    $('allMeters').addEventListener('toggle', loadMeters);
+    document.querySelectorAll('.pair-meter').forEach(meter => meter.insertAdjacentHTML('beforeend', meterScaleMarkup()));
+    $('allMeters').addEventListener('toggle', () => renderAllMeters(lastMeterRecords));
     $('captureMeterBaseline').addEventListener('click', captureMeterBaseline);
     $('compareMeterBaseline').addEventListener('click', compareMeterBaseline);
     tabs.forEach(tab => {
@@ -851,27 +1344,46 @@
     window.addEventListener('hashchange', () => activateTab(window.location.hash.slice(1), { updateHash: false }));
     $('host').addEventListener('change', () => {
       preampCount = 0;
+      lineInputCount = 0;
+      lineInputChannels = [];
       outputCount = 0;
+      lineOutputLabelData = {};
+      lineOutputMeterPaths = [];
       headphoneCount = 0;
+      headphoneMeterPaths = [];
+      stopMeterStream();
       loadPreamps();
-      loadOutputs();
+      if ($('tab-inputs').getAttribute('aria-selected') === 'true') loadLineInputs();
+      if ($('tab-outputs').getAttribute('aria-selected') === 'true') loadOutputs();
+      loadMeters();
     });
     // HTTP has no verified push subscription yet, so polling remains the
     // recovery path for physical-panel input changes.
     setInterval(() => {
       if (!document.hidden) {
         loadPreamps({ quiet: true });
+        if ($('tab-inputs').getAttribute('aria-selected') === 'true') loadLineInputGains({ quiet: true });
       }
     }, 750);
+    setInterval(() => {
+      // Line-input polarity remains vendor-only, so refresh its bounded
+      // snapshot while the Inputs tab is visible.
+      if (!document.hidden && $('tab-inputs').getAttribute('aria-selected') === 'true') loadLineInputs({ quiet: true });
+    }, 5000);
     setInterval(() => {
       // Output trims use one bounded vendor-state snapshot for both line and
       // headphone controls while their tab is visible.
       if (!document.hidden && $('tab-outputs').getAttribute('aria-selected') === 'true') loadOutputs({ quiet: true });
     }, 5000);
-    setInterval(loadMeters, 125);
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) {
+      if (document.hidden) {
+        stopMeterStream();
+      } else {
         loadPreamps({ quiet: true });
+        if ($('tab-inputs').getAttribute('aria-selected') === 'true') {
+          loadLineInputGains({ quiet: true });
+          loadLineInputs({ quiet: true });
+        }
         if ($('tab-outputs').getAttribute('aria-selected') === 'true') loadOutputs({ quiet: true });
         loadMeters();
       }

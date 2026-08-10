@@ -271,11 +271,51 @@ the device's HTTP control service directly.
 
 The UI is divided into **Inputs**, **Outputs**, **Mixer**, and **Diagnostics**
 tabs. Inputs contains live Mic 1-4 controls for preamp name, gain, 48 V, pad,
-and polarity. Outputs contains line-output gain controls plus the headphone
-outputs advertised by the connected device. Mixer contains the
-capture-validated faders and read-only meters, while Diagnostics keeps the raw
+and polarity, plus gain and polarity controls for Line Inputs 5-12. Outputs
+contains line-output gain controls plus the headphone outputs advertised by
+the connected device. Inputs and Outputs show live per-channel signal meters;
+Phones meters retain separate L/R lanes. Mixer contains the capture-validated
+faders and full read-only meter diagnostics, while Diagnostics keeps the raw
 read, write, and probe controls for the remaining datastore surface. The
 selected tab is retained in the URL fragment.
+
+Input and line-output strip headings are not fixed display strings. The UI
+reads `ch/<index>/name` from Mic input bank `0`, Analog input bank `1`, and
+Analog output bank `0`, and uses `Mic / Inst N`, `Line In N`, or `Line Out N`
+only when the corresponding device label is blank. Renamed labels therefore
+appear on the control strips and mapped meters. Mic, Line In, and Line Out
+labels share the same inline editor: click the displayed name, type the
+replacement, then press Enter or click away to save; Escape cancels. Saves use
+the corresponding bank's `/ch/<index>/name` datastore path. Channel strips
+follow CueMix's vertical layout, with a gain fader beside the level meter. Mic
+48 V, Pad, and Polarity and the Line Input Polarity control are latching on/off
+buttons.
+
+### Line inputs
+
+The tested 848's HTTP compatibility datastore advertises an eight-channel
+`Analog` input bank at `/datastore/ext/ibank/1`, with a `0:20` dB gain range.
+Its live gains `[20,20,0,0,0,0,0,0]` exactly match the bounded vendor-state
+snapshot's eight one-byte property-`0x13b2` records at indices `0` through `7`.
+The HTTP bank does not expose a line-input phase field. The adjacent vendor
+property `0x13b3` supplies eight boolean values at the same indices, and the
+installed CueMix Pro binary models `kLineInGain` and `kLineInPhase` as distinct
+controls. These indices are shown as the 848's physical Line Inputs 5-12.
+
+The Inputs tab discovers the sorted gain and polarity record sets and requires
+their indices to match before exposing either control. Gain is limited to
+integer `0` through `20` dB and polarity to boolean values. Like Mic gain, Line
+Input gain updates its displayed value immediately, debounces writes while the
+slider moves, writes `/datastore/ext/ibank/1/ch/<index>/trim`, and uses the
+750-millisecond HTTP refresh to recover changes from other controllers. The
+vendor snapshot is retained only for the polarity state that HTTP omits.
+
+One explicit polarity change writes only a freshly discovered index through
+protocol `00:01:f2:00:00:03`, using
+`13:b3:<u16 index>:01:<0|1>`. Rendering, refreshing, polling, and automated
+verification never write polarity. This exact write and concurrent
+external-controller behavior remain to be confirmed with a controlled user
+action; close CueMix Pro before changing polarity.
 
 ### Line output trims
 
@@ -348,30 +388,55 @@ Only these capture-validated controls are available: `Main 1-2 / Host 11-12`,
 `00:00:41:89` for `-60 dB`; do not infer intermediate values, other strips, or
 other buses until they are separately captured.
 
-### Live mixer meters
+### Live channel meters
 
-The mixer page also opens one local, read-only AVDECC meter session while it is
-visible. It uses the capture-observed protocol `00:01:f2:00:00:04`, receives
-its two meter pages, and exposes every packed channel sample through
-`/api/mixer/meters`. The primary `0x13ad:0` record has 32 stereo-pair samples
-for the 64-channel Mix In bank. Its seventh pair is Mic/Inst 1-2; Host 11-12
-is pair 6 and Line In 5-6 is pair 11. A two-sample `0x138c:0` record maps to
-Mic/Inst pairs 1-2 and 3-4. A Mic 1-only tap also maps pair 7 of
-`0x13ad:0x20` and `0x13ad:0x40` to Mic/Inst 1-2, although those two mirrored
-signal stages remain unidentified. A separate Mic 2-only tap changes those
-same four pair samples, confirming that each is a stereo-pair aggregate rather
-than an independent Mic 1 reading. The rest are available under **All captured meter
-channels** by property and vendor bank. The samples encode negative dBFS as a
-big-endian Q8.8 attenuation value: `−raw / 256`; `0xffff` is silence. The UI
-uses a −144 to 0 dBFS visual range and retains the raw value in each meter's
-hover text. A fader write first closes the local meter session, avoiding
-concurrent vendor sessions, and metering resumes on the next page refresh.
+The Inputs, Outputs, and Mixer tabs share one local, read-only AVDECC meter
+session. It uses the capture-observed protocol `00:01:f2:00:00:04`, receives
+its two meter pages, and exposes both the packed words and decoded channels.
+The browser opens `/api/mixer/meters/events` as a Server-Sent Events stream;
+each completed device snapshot is pushed immediately and rendering is
+coalesced to the next animation frame. `/api/mixer/meters` remains available
+as a one-shot snapshot endpoint. Every big-endian 16-bit word contains two
+independent one-byte attenuation values: the high byte is the first/left
+channel and the low byte is the second/right channel. Values `0x00` through
+`0xfe` are positive attenuation magnitudes in 0.5 dB steps, and `0xff` is
+silence. For example, `0x6a6f` is −53 dBFS on the first channel and −55.5
+dBFS on the second. This supersedes the earlier Q8.8 interpretation of the
+whole word and the initial one-byte/one-dB assumption.
+
+The tested 848 maps `0x138c:0` to Mic / Inst channels 1-4 and `0x13ac:0` to
+Line Inputs 5-12. The bounded initial state also advertises routing-aware meter
+paths rather than requiring fixed output assumptions. Each `0x93ac` line-output
+record contains `u16 meter property / u8 record index / u8 channel index`; its
+12 indices correspond to the 12 discovered line outputs. Each `0x13b4`
+headphone record has the same path format and identifies the first channel of
+that Phones output, so the UI renders that channel and the following channel as
+separate L/R lanes. Meter paths are optional: an unsupported device shows an
+empty meter instead of receiving a guessed mapping.
+
+The primary `0x13ad:0` record has 32 packed stereo words for the 64-channel Mix
+In bank. Its sixth word is Host 11-12, its seventh is Mic / Inst 1-2, and its
+eleventh is Line In 5-6. The same Mic / Inst word appears at the still-unmapped
+`0x13ad:0x20` and `0x13ad:0x40` stages. The remaining raw records stay
+available under **All captured meter channels**. The UI uses a −127 to 0 dBFS
+visual range and retains decoded and raw values in hover text. Meters rise
+vertically beside their channel controls, with adjacent L/R bars for Phones.
+The low-level region is compressed so the visible marks at −∞, −48, −36, −24,
+−12, −6, −3, and clip remain evenly spaced and readable. A thin peak marker
+jumps to every new louder sample and holds that position for one second after
+the live level falls. A vendor control or
+inventory refresh first closes the local meter session, avoiding concurrent
+vendor sessions; the event stream reconnects after that bounded operation and
+resumes metering. Empty startup snapshots preserve the last displayed values,
+so a bounded restart does not flash every meter to zero. The device request
+loop targets a 5-millisecond interval; actual cadence is bounded by the time
+needed to receive both device pages.
 
 The **Capture meter baseline** and **Compare to baseline** helper performs no
 hardware write. Use it to map the remaining vendor groups: capture while a
 known source is quiet, introduce that source alone (or change one fader with a
-steady source), then compare. It lists samples whose raw value changed by at
-least 256, including the vendor property/bank and source name where known.
+steady source), then compare. It reports individual channel changes of at
+least 0.5 dB, including the vendor property/bank and source name where known.
 
 ## Linux Audio Recovery
 
