@@ -4,6 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>cuemix-848</title>
+  <script>
+    // Apply an explicit preference before first paint. System mode intentionally
+    // leaves the attribute unset so the media query remains authoritative.
+    try {
+      const savedTheme = localStorage.getItem('cuemix-848-theme');
+      if (savedTheme === 'light' || savedTheme === 'dark') {
+        document.documentElement.dataset.theme = savedTheme;
+      }
+    } catch (_) { /* Storage can be unavailable in privacy-restricted browsers. */ }
+  </script>
   <style>
     :root {
       color-scheme: light dark;
@@ -13,6 +23,7 @@
       --panel: #ffffff;
       --line: #cfd8c8;
       --accent: #1f7a5f;
+      --accent-ink: #ffffff;
       --warn: #9f3f24;
       --code: #101412;
     }
@@ -24,9 +35,34 @@
         --panel: #1c211d;
         --line: #394238;
         --accent: #60c1a1;
+        --accent-ink: #07140f;
         --warn: #ff9b78;
         --code: #070907;
       }
+    }
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --bg: #f6f7f4;
+      --ink: #171916;
+      --muted: #5a6157;
+      --panel: #ffffff;
+      --line: #cfd8c8;
+      --accent: #1f7a5f;
+      --accent-ink: #ffffff;
+      --warn: #9f3f24;
+      --code: #101412;
+    }
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #121512;
+      --ink: #f4f6f1;
+      --muted: #a8b0a4;
+      --panel: #1c211d;
+      --line: #394238;
+      --accent: #60c1a1;
+      --accent-ink: #07140f;
+      --warn: #ff9b78;
+      --code: #070907;
     }
     * { box-sizing: border-box; }
     body {
@@ -40,7 +76,9 @@
     header { padding: 22px 0 14px; display: flex; align-items: end; justify-content: space-between; gap: 16px; }
     h1 { font-size: 22px; margin: 0; font-weight: 720; }
     .sub { color: var(--muted); margin-top: 4px; }
+    .header-controls { display: flex; align-items: end; gap: 8px; }
     .device-host { width: min(280px, 100%); }
+    .theme-control { width: 92px; }
     .tabs {
       display: flex;
       gap: 4px;
@@ -83,7 +121,7 @@
       cursor: pointer;
       background: var(--accent);
       border-color: var(--accent);
-      color: #fff;
+      color: var(--accent-ink);
       font-weight: 650;
       white-space: nowrap;
     }
@@ -175,10 +213,10 @@
       cursor: pointer;
     }
     .switch input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-    .switch-face { position: relative; display: grid; min-height: 36px; place-content: center; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: #f7f8f6; color: var(--ink); text-align: center; transition: background 120ms ease, border-color 120ms ease, color 120ms ease; }
+    .switch-face { position: relative; display: grid; min-height: 36px; place-content: center; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); text-align: center; transition: background 120ms ease, border-color 120ms ease, color 120ms ease; }
     .switch-label { overflow: hidden; font-size: 13px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
     .switch input:focus-visible + .switch-face { outline: 2px solid var(--accent); outline-offset: 2px; }
-    .switch input:checked + .switch-face { border-color: var(--accent); background: var(--accent); color: var(--panel); }
+    .switch input:checked + .switch-face { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); }
     .switch input:disabled + .switch-face { cursor: not-allowed; opacity: .55; }
     .strip-status { min-height: 17px; color: var(--muted); font-size: 12px; }
     .strip-status.pending, .strip-status.saved { color: var(--accent); }
@@ -218,7 +256,7 @@
     }
     @media (max-width: 480px) {
       header { display: block; }
-      .device-host { margin-top: 12px; }
+      .header-controls { margin-top: 12px; align-items: end; }
       .tab { flex: 1 0 auto; padding-inline: 12px; }
     }
   </style>
@@ -229,7 +267,10 @@
       <h1>cuemix-848</h1>
       <div class="sub">Linux control surface for MOTU 848 / CueMix Pro</div>
     </div>
-    <label class="device-host">Device host<input id="host" value="__DEFAULT_HOST__" readonly spellcheck="false"></label>
+    <div class="header-controls">
+      <label class="theme-control">Theme<select id="theme" aria-label="Color theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+      <label class="device-host">Device host<input id="host" value="__DEFAULT_HOST__" readonly spellcheck="false"></label>
+    </div>
   </header>
   <main>
     <nav class="tabs" role="tablist" aria-label="Control views">
@@ -327,6 +368,21 @@
   <script>
     const $ = (id) => document.getElementById(id);
     const qs = (params) => new URLSearchParams(params).toString();
+    const themeStorageKey = 'cuemix-848-theme';
+    function applyTheme(theme) {
+      const selected = ['light', 'dark'].includes(theme) ? theme : 'system';
+      document.documentElement.toggleAttribute('data-theme', selected !== 'system');
+      if (selected === 'system') document.documentElement.removeAttribute('data-theme');
+      else document.documentElement.dataset.theme = selected;
+      $('theme').value = selected;
+    }
+    function loadTheme() {
+      try {
+        applyTheme(localStorage.getItem(themeStorageKey) || 'system');
+      } catch (_) {
+        applyTheme('system');
+      }
+    }
     const preampPath = '/datastore/ext/ibank/0';
     const lineInputPath = '/datastore/ext/ibank/1';
     const lineOutputPath = '/datastore/ext/obank/0';
@@ -1324,6 +1380,11 @@
       return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }
     $('get').addEventListener('click', readPath);
+    $('theme').addEventListener('change', event => {
+      const theme = event.currentTarget.value;
+      applyTheme(theme);
+      try { localStorage.setItem(themeStorageKey, theme); } catch (_) { /* The choice still applies for this page load. */ }
+    });
     $('set').addEventListener('click', setPath);
     $('probe').addEventListener('click', probe);
     $('loadInputs').addEventListener('click', () => {
@@ -1357,6 +1418,7 @@
       if ($('tab-outputs').getAttribute('aria-selected') === 'true') loadOutputs();
       loadMeters();
     });
+    loadTheme();
     // HTTP has no verified push subscription yet, so polling remains the
     // recovery path for physical-panel input changes.
     setInterval(() => {

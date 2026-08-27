@@ -65,7 +65,7 @@ pub(crate) fn render_discovery(results: &[DiscoveryResult]) -> String {
     };
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>cuemix-848 discovery</title><style>
-:root{{color-scheme:light dark;--bg:#f6f7f4;--ink:#171916;--muted:#5a6157;--panel:#fff;--line:#cfd8c8;--accent:#1f7a5f}}@media(prefers-color-scheme:dark){{:root{{--bg:#121512;--ink:#f4f6f1;--muted:#a8b0a4;--panel:#1c211d;--line:#394238;--accent:#60c1a1}}}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}}main{{width:min(900px,calc(100vw - 32px));margin:0 auto;padding:28px 0}}h1{{margin:0;font-size:24px}}.sub,.muted,.host{{color:var(--muted)}}.device{{margin-top:16px;padding:18px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}}h2{{margin:0;font-size:17px}}p{{margin:8px 0}}code{{display:inline-block;margin:2px 6px 2px 0;padding:2px 5px;border-radius:4px;background:color-mix(in srgb,var(--panel),var(--ink) 8%);font-family:ui-monospace,SFMono-Regular,Consolas,monospace}}.opens{{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}}.open{{padding:7px 10px;border-radius:5px;background:var(--accent);color:white;text-decoration:none;font-weight:650}}ul{{margin:10px 0 0;padding-left:20px;color:var(--muted);font-size:12px}}.empty{{margin-top:22px;color:var(--muted)}}</style></head><body><main><h1>cuemix-848</h1><p class="sub">Discovered AVDECC devices</p>{}</main></body></html>"#,
+:root{{color-scheme:light dark;--bg:#f6f7f4;--ink:#171916;--muted:#5a6157;--panel:#fff;--line:#cfd8c8;--accent:#1f7a5f;--accent-ink:#fff}}@media(prefers-color-scheme:dark){{:root{{--bg:#121512;--ink:#f4f6f1;--muted:#a8b0a4;--panel:#1c211d;--line:#394238;--accent:#60c1a1;--accent-ink:#07140f}}}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}}main{{width:min(900px,calc(100vw - 32px));margin:0 auto;padding:28px 0}}h1{{margin:0;font-size:24px}}.sub,.muted,.host{{color:var(--muted)}}.device{{margin-top:16px;padding:18px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}}h2{{margin:0;font-size:17px}}p{{margin:8px 0}}code{{display:inline-block;margin:2px 6px 2px 0;padding:2px 5px;border-radius:4px;background:color-mix(in srgb,var(--panel),var(--ink) 8%);font-family:ui-monospace,SFMono-Regular,Consolas,monospace}}.opens{{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}}.open{{padding:7px 10px;border-radius:5px;background:var(--accent);color:var(--accent-ink);text-decoration:none;font-weight:650}}ul{{margin:10px 0 0;padding-left:20px;color:var(--muted);font-size:12px}}.empty{{margin-top:22px;color:var(--muted)}}</style></head><body><main><h1>cuemix-848</h1><p class="sub">Discovered AVDECC devices</p>{}</main></body></html>"#,
         devices
     )
 }
@@ -135,6 +135,12 @@ mod tests {
         assert!(html
             .contains("id=\"line-in-${index}-phase\" type=\"checkbox\" aria-label=\"Polarity\""));
         assert!(html.contains("class=\"channel-name-button\""));
+        assert!(html.contains("id=\"theme\" aria-label=\"Color theme\""));
+        assert!(html.contains("const themeStorageKey = 'cuemix-848-theme'"));
+        assert!(html.contains("const savedTheme = localStorage.getItem('cuemix-848-theme')"));
+        assert!(html.contains("--accent-ink: #07140f"));
+        assert!(html.contains("color: var(--accent-ink)"));
+        assert!(html.contains("background: var(--panel); color: var(--ink)"));
         assert!(html.contains("function bindPreampNameEditor("));
         assert!(html.contains("function bindChannelNameEditor("));
         assert!(html.contains("id=\"line-in-${index}-name\""));
