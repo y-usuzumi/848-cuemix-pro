@@ -485,11 +485,20 @@ controls. The KDE `848 Multichannel` slider can silence playback even after the
 native DSP links are established: PipeWire keeps those links active, but the
 adapter stops producing audible output. The per-node rule below sets PipeWire's
 `channelmix.lock-volumes` property and disables WirePlumber property restoration
-only for the MOTU playback node. The 848's physical knob remains the monitor
-level control, while desktop clients can no longer change this physical sink.
+for both MOTU playback and capture nodes. The 848's physical knob remains the
+monitor-level control and its physical preamps remain the input-gain controls,
+while desktop clients can no longer change either multichannel adapter.
 Plasma will continue to display the sink at 0% and keep its slider there because
 the native DSP adapter has no Pulse-compatible volume array; that display is not
 the 848's audible level.
+
+The capture node has the same mismatch: the 848 advertises 128 USB capture
+channels while Pulse exposes 32. The native PipeWire node has no attenuating
+volume array, so pavucontrol can continue to show the compatibility source at
+0% even while its microphone meter and captured samples are live. The lock
+prevents desktop clients from trying to apply that unusable compatibility
+control. Adjust input gain on the 848 rather than in pavucontrol, and verify the
+signal in an actual recording application after installation.
 
 Installation restarts WirePlumber and briefly interrupts every audio stream.
 The adapter property is consumed while the device node is created:

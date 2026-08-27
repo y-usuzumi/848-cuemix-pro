@@ -2,6 +2,7 @@
 set -euo pipefail
 
 MOTU_SINK="alsa_output.usb-MOTU_848_848AFEB9E2-00.multichannel-output"
+MOTU_SOURCE="alsa_input.usb-MOTU_848_848AFEB9E2-00.multichannel-input"
 RULE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wireplumber/wireplumber.conf.d"
 RULE_FILE="$RULE_DIR/90-motu-848-volume-lock.conf"
 PREVIOUS_RULE_FILE="$RULE_FILE.pre-cuemix-848"
@@ -19,8 +20,8 @@ usage() {
 Usage: enable-motu-volume-lock.sh [--check|--install|--remove]
 
 Installs a MOTU-only WirePlumber rule that prevents desktop volume clients
-from changing the 848 Multichannel sink. Installation or removal restarts
-WirePlumber and briefly interrupts audio streams.
+from changing the 848 Multichannel sink or source. Installation or removal
+restarts WirePlumber and briefly interrupts audio streams.
 
 Options:
   --check    Report whether the rule is installed and active (default).
@@ -50,15 +51,18 @@ rule_is_managed() {
     || grep -Fqx "$LEGACY_MARKER" "$RULE_FILE"
 }
 
-live_node_has_volume_lock() {
-  pw-dump | jq -e --arg node "$MOTU_SINK" '
-    [ .[] | select(
-      .type == "PipeWire:Interface:Node"
-      and .info.props["node.name"] == $node
-    ) ]
-    | length == 1
-      and .[0].info.props["channelmix.lock-volumes"] == true
-      and .[0].info.props["state.restore-props"] == false
+live_nodes_have_volume_lock() {
+  pw-dump | jq -e --arg sink "$MOTU_SINK" --arg source "$MOTU_SOURCE" '
+    def locked_node($name):
+      [ .[] | select(
+        .type == "PipeWire:Interface:Node"
+        and .info.props["node.name"] == $name
+      ) ]
+      | length == 1
+        and .[0].info.props["channelmix.lock-volumes"] == true
+        and .[0].info.props["state.restore-props"] == false;
+
+    locked_node($sink) and locked_node($source)
   ' >/dev/null
 }
 
@@ -66,7 +70,7 @@ wait_for_live_volume_lock() {
   local attempts="${1:-25}"
 
   for _ in $(seq 1 "$attempts"); do
-    if live_node_has_volume_lock; then
+    if live_nodes_have_volume_lock; then
       return 0
     fi
     sleep 0.2
@@ -155,13 +159,27 @@ write_rule() {
 
   cat >"$destination" <<EOF
 $MANAGED_MARKER
-# The 848's physical knob owns monitor level. Its 128-channel PipeWire adapter
-# must not accept desktop sink-volume changes, which can silence DSP playback.
+# The 848's physical controls own monitor and preamp levels. Protect playback
+# from real attenuation and capture from its unusable cosmetic control in the
+# truncated 32-channel Pulse compatibility view.
 monitor.alsa.rules = [
   {
     matches = [
       {
         node.name = "~alsa_output[.]usb-MOTU_848_.*[.]multichannel-output"
+      }
+    ]
+    actions = {
+      update-props = {
+        channelmix.lock-volumes = true
+        state.restore-props = false
+      }
+    }
+  }
+  {
+    matches = [
+      {
+        node.name = "~alsa_input[.]usb-MOTU_848_.*[.]multichannel-input"
       }
     ]
     actions = {
@@ -205,7 +223,7 @@ if [ "$mode" = "check" ]; then
   fi
   require_cmd jq
   require_cmd pw-dump
-  if live_node_has_volume_lock; then
+  if live_nodes_have_volume_lock; then
     echo "MOTU 848 volume-lock rule is installed and active: $RULE_FILE"
     exit 0
   fi
@@ -251,7 +269,7 @@ if [ "$mode" = "install" ]; then
     exit 1
   fi
   commit_transaction
-  echo "Installed $RULE_FILE; the live MOTU sink now rejects volume updates."
+  echo "Installed $RULE_FILE; the live MOTU sink and source now reject volume updates."
   exit 0
 fi
 
