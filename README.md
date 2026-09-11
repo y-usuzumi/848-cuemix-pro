@@ -22,6 +22,55 @@ firmware-required raw JSON form body: `json={"value":...}`.
 cargo build --release
 ```
 
+## A/B/C monitoring
+
+The **Outputs → Monitoring** panel provides Off/A/B/C/All selection plus
+**A + B**, **A + C**, and **B + C** shortcuts for enabling two groups with one
+click. Each choice replaces the active combination. It also provides the shared
+monitor level, and Monitor Group membership for the discovered Line Outs 1–12.
+Level changes save while dragging, coalesced over 60 milliseconds with only the
+latest unsent value retained. Membership and speaker selection save immediately.
+**Mute** silences the active ABC speakers or Monitor Group using the device's
+mute latch, preserving the monitor level and speaker selection. **Mono** sums
+the main output pair, or the ABC pairs when enabled, to mono; clicking again
+restores stereo. Additional Monitor Group channels are unaffected by Mono.
+**Talk** enables the device's talkback signal. All three are click-on/click-off buttons, show their
+current state, and follow changes made on the hardware. Talk stays on until
+turned off; it does not require holding the mouse button.
+
+Talk uses the microphone, destinations, level and dim already configured in
+**CueMix Pro → Home → Talkback**. Set those there before using it: a source of
+None, a level of −∞, or no destinations will produce no talkback audio. The
+browser does not change those settings or the front-panel Latch preference.
+
+Expand **ABC source & speaker connections** to choose the shared left/right
+input and each speaker pair's physical outputs. These edits enter the same
+review tray as Patchbay and Routing; **Apply connections** sends them. Moving a
+pair clears its previous physical assignments, and the tray shows any existing
+routes being replaced. Patchbay supports individual-channel/custom assignments.
+There is no automatic speaker wiring or fixed assumption that A means Line 1–2.
+
+Monitor level, selection, membership, mute, mono and talk state arrive with the live meter
+stream. The worker accepts matching device events between meter pages and
+independently reloads the device inventory every 500 milliseconds, plus scan
+time, so missed events cannot leave the cache stale. Monitor writes reuse that
+connection, check prior bytes against a fresh device inventory, and verify
+another fresh read afterward. Meters continue between inventory pages. The
+slider remains usable during saving; stale responses cannot
+overwrite newer state or a pending drag. Failed writes are not retried.
+Once an edit finishes, confirmed device values update the slider and label
+even if the browser loses the pointer-release event or the slider keeps focus.
+The five-second Outputs refresh remains as recovery. No monitor setters run in automated
+verification; live listening and new monitor-level/routing setter validation
+remain manual. Mapping details and limits are in
+[the protocol notes](docs/console-protocol.md#abc-monitoring).
+
+## Start the server
+
+```sh
+cargo run -- serve 192.168.1.50
+```
+
 ## Try it against an 848
 
 Replace `192.168.1.50` with the 848's IP address.
@@ -127,8 +176,10 @@ diagnostic-only and never sends a control command.
 
 On the tested 848, the A/B/C monitor labels resolve to standalone Audio Clusters
 `23` (`ABC Monitor L`) and `24` (`ABC Monitor R`). The only advertised standard
-Control is an unrelated `IDENTIFY` control. Do not infer an A/B/C switching
-command from those labels; its vendor-specific mapping remains unimplemented.
+Control is an unrelated `IDENTIFY` control. The browser's monitor controls use
+the separately mapped vendor properties documented in
+[console protocol evidence](docs/console-protocol.md#abc-monitoring), not that
+standard control or the compatibility HTTP datastore.
 
 On Windows, CueMix Pro also exposes a dedicated `MOTU Pro Audio v2 Ethernet`
 virtual adapter. A passive capture on that adapter showed its 848 traffic as
@@ -148,24 +199,26 @@ membership in the final two vendor-data bytes as a big-endian 16-bit bitset:
 `0003` for Line Out 1+2, `0005` for 1+3, `0009` for 1+4, `000a` for 2+4,
 `010a` after adding Line Out 9, and `090a` after adding Line Out 12. This
 validates the documented Line Out 1–12 range and the ordinary `1 << (n - 1)`
-bit position. The preceding `02` field's semantics remain unmapped. This
-identifies an acknowledged property `0x1394` command path for current-group
-membership, but does
-not map the remaining A/B/C enable, selection, or routing actions. Keep all
-write controls disabled until those actions have equally direct evidence.
+bit position. The preceding `02` is the record's value length in bytes. This
+identifies an acknowledged property `0x1394`, index zero, for the single
+Monitor Group's membership. A/B/C selection and routing have separate
+properties; A/B/C are not three indexed membership masks.
 
 Controlled B-to-A, A-to-B, B-to-C, and C-to-A+B+C transitions map active
 selection property `0x13b6` to Vendor Unique data `13:b6:00:00:01:<mask>`:
 A=`01`, B=`02`, C=`04`, and A+B+C=`07`. The app writes the combined mask
 directly. CueMix does not expose two-selection combinations in its UI, though
-the 848 front panel can select them; do not infer unobserved `03`, `05`, or
-`06` writes from this app-only evidence or expose a control.
+the 848 front panel can select them. The browser also offers the two-group masks
+`03` (A+B), `05` (A+C), and `06` (B+C) as explicit shortcuts. These extend the
+same three-bit selection field; no simultaneous input events are needed.
 
 With A+B+C set before a passive capture, deselecting C on the 848 front panel
 sent no app-originated setter. The subsequent protocol-`00:01:f2:00:00:01`
 device-to-app state response carried `13:b6:00:00:01:03`, directly confirming
 the front-panel A+B mask and providing the passive state-update path for
-front-panel-only controls. Values `05` and `06` remain unobserved.
+front-panel-only controls. The user confirmed that pressing two front-panel
+buttons enables both. Values `05` and `06` follow the independent A/B/C bits;
+their exact hardware setters remain unverified by automated tests.
 
 Disabling A/B/C monitoring sends the same acknowledged `0x13b6` command with
 mask `00` and no other event-specific command. CueMix therefore represents
@@ -396,8 +449,9 @@ save on Enter or blur. Levels accept `-inf` or −90 through +12 dB. Input mute
 and solo affect that input across mixes. **Aux Mixing** selects one input and
 shows all its aux/reverb sends together. Pre/post is a bus-wide setting.
 
-The console reads bounded AVDECC vendor-state snapshots and polls every five
-seconds while visible, over the same persistent connection as the meters.
+The console refreshes every five seconds while visible, over the same persistent
+connection as the meters. Each refresh reads the device inventory independently
+of the incremental event cache; the worker also reconciles it in the background.
 Background reads leave controls enabled and preserve a focused strip, including
 the original value used to detect a conflicting edit. An edit made during a
 read waits for it to finish, then saves and verifies readback. Transient read
@@ -416,10 +470,11 @@ and converters/property types inspected in installed CueMix Pro 1.1.12. Exact
 new hardware writes have **not** been exercised during automated verification.
 Concurrent controllers can still change state after validation; use one active
 controller when editing. Stereo-link editing, DSP effects, bus alias editing,
-AVB connection management, and hardware A/B/C monitor configuration remain
-outside this implementation. See [console protocol evidence](docs/console-protocol.md).
+and AVB connection management remain outside this implementation. A/B/C monitor
+configuration is available in Outputs. See [console protocol evidence](docs/console-protocol.md).
 
-Run the offline model tests with `node --test tools/console-model.test.cjs`.
+Run the offline model and UI race tests with
+`node --test tools/console-model.test.cjs tools/console-refresh.test.cjs tools/monitor.test.cjs`.
 For browser testing without audio hardware, run `node tools/console-fixture.cjs`
 and open `http://127.0.0.1:8482/#patchbay`. That server uses synthetic state,
 never contacts a device, and keeps edits only in memory. Rust runtime and
@@ -466,10 +521,11 @@ The low-level region is compressed so the visible marks at −∞, −48, −36,
 −12, −6, −3, and clip remain evenly spaced and readable. A thin peak marker
 jumps to every new louder sample and holds that position for one second after
 the live level falls. Inventory refreshes for the console, line inputs, and
-outputs share the persistent meter session. Fresh state pages and meter polls
-are interleaved, so routine five-second refreshes keep the event stream alive.
-Each refresh has a total deadline and a 256-page limit. Explicit vendor writes
-still close the read-only session first; the event stream reconnects afterward.
+outputs share the persistent meter session. Incremental state polls run between
+meter requests; independent full inventory reads recover missed state events.
+Each refresh has a total deadline and a 256-page limit. Monitor-level, selection
+and membership writes reuse this connection; other explicit vendor writes
+still close it first, and the event stream reconnects afterward.
 Empty startup snapshots preserve the last displayed values, so a bounded
 restart does not flash every meter to zero. The device request
 loop targets a 5-millisecond interval; actual cadence is bounded by the time

@@ -8,10 +8,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::avdecc::{
-    parse_changes, set_headphone_trim, set_line_input_phase, set_line_output_trim, set_mixer_fader,
-    start_mixer_meter_worker, write_console, HeadphoneOutput, LineInput, LineOutput, MeterPath,
-    MixerFader, MixerLevel, MixerMeterFeed, MixerMeterRecord, MixerMeters, OutputInventory,
-    OutputTrim, VendorSnapshot, VendorSnapshotRequest,
+    is_monitor_changes, parse_changes, set_headphone_trim, set_line_input_phase,
+    set_line_output_trim, set_mixer_fader, start_mixer_meter_worker, write_console, ConsoleChange,
+    ConsoleWriteError, HeadphoneOutput, LineInput, LineOutput, MeterPath, MixerFader, MixerLevel,
+    MixerMeterFeed, MixerMeterRecord, MixerMeters, MonitorState, MonitorWriteRequest,
+    OutputInventory, OutputTrim, VendorSnapshot, VendorSnapshotRequest,
 };
 use crate::device::{datastore_write_request, json_escape, percent_decode, DeviceClient};
 use crate::discovery::{browser_control_hosts, discover_avdecc, DiscoveryResult};
@@ -49,11 +50,50 @@ struct MeterHub {
 struct MeterWorker {
     stop_sender: mpsc::Sender<mpsc::Sender<()>>,
     state_sender: mpsc::Sender<VendorSnapshotRequest>,
+    monitor_sender: mpsc::Sender<MonitorWriteRequest>,
     pending_stop: Option<mpsc::Receiver<()>>,
     meters: Arc<MixerMeterFeed>,
 }
 
 impl MeterHub {
+    fn write_monitor(
+        &self,
+        host: &str,
+        target: u64,
+        changes: Vec<ConsoleChange>,
+        timeout: Duration,
+    ) -> Result<(usize, MonitorState), ConsoleWriteError> {
+        let error = |message: String| ConsoleWriteError {
+            applied: 0,
+            conflict: false,
+            message,
+        };
+        self.start(host, target, timeout).map_err(error)?;
+        let sender = {
+            let workers = self
+                .workers
+                .lock()
+                .map_err(|_| error("device session registry unavailable".into()))?;
+            let worker = workers
+                .get(host)
+                .ok_or_else(|| error("device session unavailable".into()))?;
+            if worker.pending_stop.is_some() {
+                return Err(error("device session is closing".into()));
+            }
+            worker.monitor_sender.clone()
+        };
+        let (reply, receiver) = mpsc::channel();
+        sender
+            .send(MonitorWriteRequest {
+                deadline: Instant::now() + timeout,
+                changes,
+                reply,
+            })
+            .map_err(|_| error("monitor worker unavailable".into()))?;
+        receiver.recv_timeout(timeout).map_err(|_| {
+            error("monitor response timed out; outcome unknown; refresh before retrying".into())
+        })?
+    }
     fn reap_stopped(workers: &mut HashMap<String, MeterWorker>, host: &str) -> Result<(), String> {
         if let Some(receiver) = workers
             .get(host)
@@ -102,6 +142,7 @@ impl MeterHub {
             MeterWorker {
                 stop_sender: worker.stop_sender,
                 state_sender: worker.state_sender,
+                monitor_sender: worker.monitor_sender,
                 meters: worker.meters,
                 pending_stop: None,
             }
@@ -639,6 +680,20 @@ fn route_browser_request(
                 Ok(target) => target,
                 Err(error) => return error,
             };
+            if is_monitor_changes(&changes) {
+                return match meter_hub.write_monitor(&host, target, changes, timeout) {
+                    Ok((applied, monitor)) => json_response(
+                        200,
+                        format!(
+                            r#"{{"acknowledged":{applied},"monitor":{}}}"#,
+                            monitor.json()
+                        ),
+                    ),
+                    Err(error) => {
+                        json_response(if error.conflict { 409 } else { 502 }, error.json())
+                    }
+                };
+            }
             if let Err(error) = meter_hub.stop(&host, timeout) {
                 return json_error(502, &error);
             }
@@ -884,9 +939,17 @@ fn proxy_outputs_or_error(
     };
     match meter_hub
         .read_state(&host, target_entity_id, timeout)
-        .and_then(|state| state.outputs())
-    {
-        Ok(inventory) => json_response(200, output_inventory_json(&inventory)),
+        .and_then(|state| {
+            let inventory = state.outputs()?;
+            let monitor = state.1.json();
+            let console = state.console()?.json();
+            let mut json = output_inventory_json(&inventory);
+            json.pop();
+            Ok(format!(
+                "{json},\"console\":{console},\"monitor\":{monitor}}}"
+            ))
+        }) {
+        Ok(json) => json_response(200, json),
         Err(error) => json_error(502, &error),
     }
 }
@@ -1186,13 +1249,14 @@ fn mixer_meters_json(snapshot: &MixerMeters) -> String {
         .updated_at
         .map(|updated_at| updated_at.elapsed().as_millis());
     format!(
-        "{{\"status\":\"{}\",\"age_ms\":{},\"error\":{},\"faders\":{{{faders}}},\"records\":[{records}]}}",
+        "{{\"status\":\"{}\",\"age_ms\":{},\"error\":{},\"monitor\":{},\"faders\":{{{faders}}},\"records\":[{records}]}}",
         if snapshot.records.is_empty() { "starting" } else { "ok" },
         age_ms.map_or_else(|| "null".to_string(), |age| age.to_string()),
         snapshot
             .error
             .as_deref()
-            .map_or_else(|| "null".to_string(), |error| format!("\"{}\"", json_escape(error)))
+            .map_or_else(|| "null".to_string(), |error| format!("\"{}\"", json_escape(error))),
+        snapshot.monitor.as_ref().map_or_else(|| "null".to_string(), MonitorState::json)
     )
 }
 

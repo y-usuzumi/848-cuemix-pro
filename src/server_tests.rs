@@ -142,6 +142,7 @@ fn formats_all_raw_meter_records_and_the_validated_fader_pairs() {
         }],
         updated_at: Some(Instant::now()),
         error: None,
+        monitor: None,
     };
     let json = mixer_meters_json(&snapshot);
     assert!(json.contains("\"property_id\":\"13ad\""));
@@ -161,6 +162,7 @@ fn formats_meter_snapshots_as_server_sent_events() {
         }],
         updated_at: Some(Instant::now()),
         error: None,
+        monitor: None,
     };
     let mut event = Vec::new();
     write_mixer_meter_event(&mut event, 42, &snapshot).unwrap();
@@ -262,12 +264,14 @@ fn timed_out_stop_keeps_the_worker_registered_until_it_actually_closes() {
     let hub = MeterHub::default();
     let (stop_sender, stop_receiver) = mpsc::channel();
     let (state_sender, _state_receiver) = mpsc::channel();
+    let (monitor_sender, _monitor_receiver) = mpsc::channel();
     let meters = Arc::new(MixerMeterFeed::default());
     hub.workers.lock().unwrap().insert(
         "device".into(),
         MeterWorker {
             stop_sender,
             state_sender,
+            monitor_sender,
             pending_stop: None,
             meters: Arc::clone(&meters),
         },

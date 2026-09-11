@@ -73,7 +73,7 @@ fn rejects_entire_stale_or_invalid_route_batch_before_writing() {
         "route:line:1:00000000:13b00001",    // stale prior value
         "route:line:1:13ad0101:13b000ff",    // nonexistent source
         "route:line:12:13ad0101:13b00001",   // nonexistent destination
-        "route:monitor:0:00000000:13b00001", // unmapped monitor command
+        "route:monitor:0:00000000:13b00001", // monitor is not advertised
     ] {
         assert!(console
             .prepare(&parse_changes(&format!("{valid};{invalid}")).unwrap())
@@ -118,8 +118,180 @@ fn excludes_unmapped_properties_and_rejects_duplicate_state() {
         value: vec![0],
     };
     assert!(ConsoleState::from_records(vec![record.clone(), record]).is_err());
-    assert!(!relevant(0x1394)); // monitor group actions remain outside the console
+    assert!(!relevant(0x1395)); // unrelated monitor setting remains unmapped
     assert!(!relevant(0x001f)); // preset commands
+}
+
+fn monitor_state() -> ConsoleState {
+    let mut console = state();
+    for (p, i, v) in [
+        (0x13b6, 0, vec![0]),
+        (0x1393, 0, vec![30]),
+        (0x1394, 0, vec![0, 3]),
+        (0x93b9, 0, vec![0; 4]),
+        (0x93b9, 1, vec![0; 4]),
+        (0x93ad, 0, vec![0; 4]),
+    ] {
+        console.records.insert((p, i), v);
+    }
+    for i in 0..12 {
+        console.records.insert((0x1388, i), vec![0]);
+    }
+    console
+}
+
+#[test]
+fn monitor_controls_match_selection_bitmask_and_captured_membership_bytes() {
+    let console = monitor_state();
+    for mask in 1..=7 {
+        let writes = console
+            .prepare(&parse_changes(&format!("monitor-select:monitor:0:00:{mask}")).unwrap())
+            .unwrap();
+        assert_eq!((writes[0].property, writes[0].index), (0x13b6, 0));
+        assert_eq!(writes[0].value, [mask]);
+    }
+    let writes = console
+        .prepare(
+            &parse_changes("monitor-members:monitor:0:0003:2314;monitor-level:monitor:0:1e:-inf")
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(writes[0].value, [9, 10]); // Captured members 2, 4, 9, 12.
+    assert_eq!((writes[1].property, &writes[1].value), (0x1393, &vec![100]));
+    assert!(console.prepare(&parse_changes("monitor-select:monitor:0:00:0;monitor-level:monitor:0:1e:-30;monitor-members:monitor:0:0003:3").unwrap()).unwrap().is_empty());
+}
+
+#[test]
+fn rejects_stale_monitor_state_unmapped_masks_and_invalid_levels() {
+    for invalid in [
+        "monitor-select:monitor:0:00:-1",
+        "monitor-select:monitor:0:00:255",
+        "monitor-select:monitor:0:00:256",
+        "monitor-select:monitor:0:00:8",
+        "monitor-select:monitor:1:00:1",
+        "monitor-select:main:0:00:1",
+        "monitor-select:monitor:0:01:2",
+        "monitor-level:monitor:0:1e:1",
+        "monitor-level:monitor:0:1e:-100",
+        "monitor-level:monitor:0:1e:NaN",
+        "monitor-level:monitor:0:1e:-10.5",
+        "monitor-members:monitor:0:0003:4096",
+        "monitor-members:monitor:0:0001:3",
+    ] {
+        assert!(
+            monitor_state()
+                .prepare(&parse_changes(invalid).unwrap())
+                .is_err(),
+            "{invalid}"
+        );
+    }
+    let mut console = monitor_state();
+    console.records.insert((0x13b6, 0), vec![3]); // A+B can be changed or turned off.
+    assert!(console
+        .prepare(&parse_changes("monitor-select:monitor:0:03:0").unwrap())
+        .is_ok());
+    console.records.insert((0x1394, 0), vec![0x10, 3]);
+    assert!(console
+        .prepare(&parse_changes("monitor-members:monitor:0:1003:3").unwrap())
+        .is_err());
+}
+
+#[test]
+fn speaker_combinations_switch_with_one_mask_and_preserve_conflict_checks() {
+    let mut console = monitor_state();
+    for (old, new) in [(1, 3), (3, 5), (5, 6), (6, 7), (7, 0)] {
+        console.records.insert((0x13b6, 0), vec![old]);
+        let changes = parse_changes(&format!("monitor-select:monitor:0:{old:02x}:{new}")).unwrap();
+        let writes = console.prepare(&changes).unwrap();
+        assert_eq!(
+            writes,
+            vec![WriteRecord {
+                property: 0x13b6,
+                index: 0,
+                value: vec![new]
+            }]
+        );
+        console.records.insert((0x13b6, 0), vec![new]);
+        assert!(console
+            .prepare(&changes)
+            .unwrap_err()
+            .starts_with("conflict:"));
+    }
+}
+
+#[test]
+fn front_panel_buttons_require_advertised_booleans_and_reject_batch_conflicts() {
+    let mut console = monitor_state();
+    for (operation, property) in [
+        ("monitor-mute", 0x139b),
+        ("monitor-mono", 0x139a),
+        ("monitor-talk", 0x13a3),
+    ] {
+        let enable = parse_changes(&format!("{operation}:monitor:0:00:1")).unwrap();
+        assert!(is_monitor_changes(&enable));
+        assert!(console.prepare(&enable).is_err()); // Not advertised yet.
+        for malformed in [vec![2], vec![0, 0]] {
+            console.records.insert((property, 0), malformed);
+            assert!(console.prepare(&enable).is_err());
+        }
+        console.records.insert((property, 0), vec![0]);
+        assert_eq!(
+            console.prepare(&enable).unwrap(),
+            vec![WriteRecord {
+                property,
+                index: 0,
+                value: vec![1]
+            }]
+        );
+        for invalid in [
+            format!("{operation}:monitor:0:00:2"),
+            format!("{operation}:monitor:0:00:true"),
+            format!("{operation}:monitor:1:00:1"),
+            format!("{operation}:main:0:00:1"),
+        ] {
+            assert!(console.prepare(&parse_changes(&invalid).unwrap()).is_err());
+        }
+        console.records.insert((property, 0), vec![1]);
+        assert!(console
+            .prepare(&enable)
+            .unwrap_err()
+            .starts_with("conflict:"));
+        let disable = parse_changes(&format!("{operation}:monitor:0:01:0")).unwrap();
+        assert_eq!(console.prepare(&disable).unwrap()[0].value, [0]);
+    }
+    let stale_batch =
+        parse_changes("monitor-mute:monitor:0:01:0;monitor-talk:monitor:0:00:1").unwrap();
+    assert!(console
+        .prepare(&stale_batch)
+        .unwrap_err()
+        .starts_with("conflict:"));
+    assert_eq!(console.get(0x1393, 0).unwrap(), [30]);
+    assert_eq!(console.get(0x13b6, 0).unwrap(), [0]);
+}
+
+#[test]
+fn monitor_routing_requires_stereo_inventory_and_rejects_feedback() {
+    let mut console = monitor_state();
+    let changes =
+        parse_changes("route:monitor:1:00000000:13b00001;route:line:1:13ad0101:13b90201").unwrap();
+    let writes = console.prepare(&changes).unwrap();
+    assert_eq!((writes[0].property, writes[0].index), (0x93b9, 1));
+    assert_eq!(writes[1].value, [0x13, 0xb9, 2, 1]);
+    for invalid in [
+        "route:monitor:0:00000000:13b90000",
+        "route:mixer:0:00000000:13b90000",
+        "route:line:1:13ad0101:13b90300",
+        "route:line:1:13ad0101:13b90002",
+        "route:monitor:2:00000000:13b00000",
+    ] {
+        assert!(
+            console.prepare(&parse_changes(invalid).unwrap()).is_err(),
+            "{invalid}"
+        );
+    }
+    console.records.remove(&(0x93b9, 1));
+    assert!(!console.monitor_available());
+    assert!(console.prepare(&changes).is_err());
 }
 
 #[test]

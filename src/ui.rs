@@ -5,6 +5,7 @@ pub(crate) fn render(default_host: &str, session_token: &str) -> String {
         .replace("__CONSOLE_CSS__", include_str!("console.css"))
         .replace("__CONSOLE_PANELS__", include_str!("console_panels.html"))
         .replace("__CONSOLE_MODEL__", include_str!("console_model.js"))
+        .replace("__MONITOR_JS__", include_str!("monitor.js"))
         .replace("__CONSOLE_JS__", include_str!("console.js"))
         .replace("__DEFAULT_HOST__", &html_escape(default_host))
         .replace("__SESSION_TOKEN__", session_token)

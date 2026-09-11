@@ -424,7 +424,14 @@ fn meter_feed_notifies_each_snapshot_and_closure() {
 
 // A local protocol peer exercises the actual TCP session and worker channels.
 // State pages are delayed enough to require an intervening meter request.
-fn simulated_meter_peer() -> (String, thread::JoinHandle<Vec<u8>>) {
+fn simulated_meter_peer_with_monitor(reject_write: bool) -> (String, thread::JoinHandle<Vec<u8>>) {
+    simulated_meter_peer_with_lost_updates(reject_write, false)
+}
+
+fn simulated_meter_peer_with_lost_updates(
+    reject_write: bool,
+    lose_updates: bool,
+) -> (String, thread::JoinHandle<Vec<u8>>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let peer = thread::spawn(move || {
@@ -444,6 +451,12 @@ fn simulated_meter_peer() -> (String, thread::JoinHandle<Vec<u8>>) {
         let mut prior_sequence = 0u16;
         let mut state_sequence = 0u16;
         let mut generation = 0u8;
+        let mut terminal = false;
+        let mut attenuation = 30u8;
+        let mut muted = 0u8;
+        let mut mono = 0u8;
+        let mut talking = 0u8;
+        let mut external_sent = false;
         loop {
             let mut header = [0; 12];
             if let Err(error) = stream.read_exact(&mut header) {
@@ -464,14 +477,89 @@ fn simulated_meter_peer() -> (String, thread::JoinHandle<Vec<u8>>) {
             assert_eq!(sequence, prior_sequence.wrapping_add(1));
             prior_sequence = sequence;
             let protocol = frame.payload[27];
-            assert!(matches!(protocol, 1 | 4), "read-only worker sent a setter");
+            assert!(matches!(protocol, 1 | 3 | 4));
             let data = if protocol == 1 {
                 if frame.payload.len() == 28 {
                     generation += 1;
                     state_sequence = sequence;
                     trace.push(1);
                     thread::sleep(Duration::from_millis(25));
-                    vec![0x03, 0xfb, 0, 0, 1, generation]
+                    terminal = true;
+                    vec![
+                        0x03,
+                        0xfb,
+                        0,
+                        0,
+                        1,
+                        generation,
+                        0x13,
+                        0x93,
+                        0,
+                        0,
+                        1,
+                        attenuation,
+                        0x13,
+                        0x9a,
+                        0,
+                        0,
+                        1,
+                        mono,
+                        0x13,
+                        0x9b,
+                        0,
+                        0,
+                        1,
+                        muted,
+                        0x13,
+                        0xa3,
+                        0,
+                        0,
+                        1,
+                        talking,
+                        0x13,
+                        0x94,
+                        0,
+                        0,
+                        2,
+                        0,
+                        3,
+                        0x13,
+                        0xb6,
+                        0,
+                        0,
+                        1,
+                        0,
+                        0x93,
+                        0xb9,
+                        0,
+                        0,
+                        4,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0x93,
+                        0xb9,
+                        0,
+                        1,
+                        4,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0x13,
+                        0x88,
+                        0,
+                        0,
+                        1,
+                        0,
+                        0x13,
+                        0x88,
+                        0,
+                        1,
+                        1,
+                        0,
+                    ]
                 } else {
                     assert_eq!(
                         &frame.payload[28..],
@@ -479,8 +567,42 @@ fn simulated_meter_peer() -> (String, thread::JoinHandle<Vec<u8>>) {
                         "ACK must refer to the state page, not the intervening meter sequence"
                     );
                     trace.push(2);
-                    Vec::new()
+                    state_sequence = sequence;
+                    if terminal || lose_updates {
+                        terminal = false;
+                        Vec::new()
+                    } else {
+                        terminal = true;
+                        generation = generation.wrapping_add(1);
+                        vec![
+                            0x03,
+                            0xfb,
+                            0,
+                            0,
+                            1,
+                            generation,
+                            0x13,
+                            0x93,
+                            0,
+                            0,
+                            1,
+                            attenuation,
+                        ]
+                    }
                 }
+            } else if protocol == 3 {
+                trace.push(3);
+                assert_eq!(&frame.payload[30..33], &[0, 0, 1]);
+                if !reject_write {
+                    match &frame.payload[28..30] {
+                        [0x13, 0x93] => attenuation = frame.payload[33],
+                        [0x13, 0x9b] => muted = frame.payload[33],
+                        [0x13, 0x9a] => mono = frame.payload[33],
+                        [0x13, 0xa3] => talking = frame.payload[33],
+                        _ => panic!("unexpected monitor setter"),
+                    }
+                }
+                Vec::new()
             } else {
                 trace.push(4);
                 vec![0, 0, 0x13, 0xad, 0, 2, 0x6a, 0x6f]
@@ -490,8 +612,30 @@ fn simulated_meter_peer() -> (String, thread::JoinHandle<Vec<u8>>) {
             frame.payload[1] = 7;
             frame.payload[2..4].copy_from_slice(&(16u16 + data.len() as u16).to_be_bytes());
             frame.payload.extend(data);
+            if protocol == 3 && reject_write {
+                frame.payload[2] |= 8;
+            }
             stream.write_all(&frame.encode().unwrap()).unwrap();
             if protocol == 4 {
+                if !external_sent {
+                    // A front-panel update arrives between the two meter pages.
+                    // Wrong sequence/controller/length must not become state.
+                    let mut event = frame.clone();
+                    event.payload.truncate(28);
+                    event.payload[27] = 1;
+                    event.payload[20..22].copy_from_slice(&state_sequence.to_be_bytes());
+                    event.payload[2..4].copy_from_slice(&22u16.to_be_bytes());
+                    event.payload.extend([0x13, 0x93, 0, 0, 1, 40]);
+                    let mut wrong = event.clone();
+                    wrong.payload[20..22].copy_from_slice(&65500u16.to_be_bytes());
+                    wrong.payload[33] = 99;
+                    stream.write_all(&wrong.encode().unwrap()).unwrap();
+                    attenuation = if lose_updates { 45 } else { 40 };
+                    if !lose_updates {
+                        stream.write_all(&event.encode().unwrap()).unwrap();
+                    }
+                    external_sent = true;
+                }
                 stream.write_all(&frame.encode().unwrap()).unwrap();
             }
         }
@@ -501,7 +645,7 @@ fn simulated_meter_peer() -> (String, thread::JoinHandle<Vec<u8>>) {
 
 #[test]
 fn repeated_fresh_reads_share_the_meter_session_and_preserve_state_ack_sequences() {
-    let (address, peer) = simulated_meter_peer();
+    let (address, peer) = simulated_meter_peer_with_monitor(false);
     let timeout = Duration::from_secs(2);
     let worker = start_mixer_meter_worker(address, 0x0001_f2ff_fefe_b9e2, timeout);
     let mut revision = worker
@@ -510,7 +654,8 @@ fn repeated_fresh_reads_share_the_meter_session_and_preserve_state_ack_sequences
         .unwrap()
         .unwrap()
         .revision;
-    for generation in [2, 3] {
+    let mut previous_generation = 0;
+    for _ in 0..2 {
         let (reply, receiver) = mpsc::channel();
         worker
             .state_sender
@@ -520,12 +665,22 @@ fn repeated_fresh_reads_share_the_meter_session_and_preserve_state_ack_sequences
             })
             .unwrap();
         let state = receiver.recv_timeout(timeout).unwrap().unwrap();
-        assert_eq!(
-            state.0[0].value,
-            vec![generation],
-            "each request must read fresh device state"
+        let generation = state
+            .0
+            .iter()
+            .find(|r| r.property_id == 0x03fb)
+            .unwrap()
+            .value[0];
+        assert!(
+            generation > previous_generation,
+            "each request must read fresh incremental state"
         );
-        let update = worker.meters.snapshot().unwrap();
+        previous_generation = generation;
+        let update = worker
+            .meters
+            .wait_after(revision, timeout)
+            .unwrap()
+            .unwrap();
         assert!(!update.closed);
         assert!(
             update.revision > revision,
@@ -550,11 +705,237 @@ fn repeated_fresh_reads_share_the_meter_session_and_preserve_state_ack_sequences
     assert!(worker.meters.snapshot().unwrap().closed);
     let trace = peer.join().unwrap();
     assert_eq!(trace.iter().filter(|&&kind| kind == 1).count(), 3);
-    assert_eq!(
-        trace
-            .windows(3)
-            .filter(|window| *window == [1, 4, 2])
-            .count(),
-        2
+    assert!(
+        !trace.contains(&3),
+        "background updates must never send setters"
     );
+    assert!(trace.iter().filter(|&&kind| kind == 4).count() >= 2);
+}
+
+#[test]
+fn front_panel_writes_read_back_device_latches_without_touching_level_or_selection() {
+    let (address, peer) = simulated_meter_peer_with_monitor(false);
+    let timeout = Duration::from_secs(2);
+    let meters = Arc::new(MixerMeterFeed::default());
+    let mut session = MixerMeterSession::open(&address, 0x0001_f2ff_fefe_b9e2, timeout).unwrap();
+    session.poll(timeout).unwrap();
+    let before = session.monitor_revision;
+    let changes = parse_changes(
+        "monitor-mute:monitor:0:00:1;monitor-mono:monitor:0:00:1;monitor-talk:monitor:0:00:1",
+    )
+    .unwrap();
+    let (count, state) = session
+        .write_monitor(&changes, Instant::now() + timeout, &meters)
+        .unwrap();
+    assert_eq!(count, 3);
+    assert!(state.revision > before);
+    for property in [0x139b, 0x139a, 0x13a3] {
+        assert_eq!(
+            state
+                .records
+                .iter()
+                .find(|r| r.property_id == property)
+                .unwrap()
+                .value,
+            [1]
+        );
+    }
+    assert_eq!(session.state.get(&(0x1393, 0)), Some(&vec![40]));
+    assert_eq!(session.state.get(&(0x13b6, 0)), Some(&vec![0]));
+    let stale = parse_changes("monitor-mute:monitor:0:01:0;monitor-mono:monitor:0:00:1").unwrap();
+    assert!(
+        session
+            .write_monitor(&stale, Instant::now() + timeout, &meters)
+            .unwrap_err()
+            .conflict
+    );
+    let no_op = parse_changes(
+        "monitor-mute:monitor:0:01:1;monitor-mono:monitor:0:01:1;monitor-talk:monitor:0:01:1",
+    )
+    .unwrap();
+    assert_eq!(
+        session
+            .write_monitor(&no_op, Instant::now() + timeout, &meters)
+            .unwrap()
+            .0,
+        0
+    );
+    // Front-panel changes must update streamed state and its revision.
+    for property in [0x139a_u16, 0x13a3] {
+        let revision = session.monitor_revision;
+        let [hi, lo] = property.to_be_bytes();
+        session.apply_state(&[hi, lo, 0, 0, 1, 0]).unwrap();
+        assert!(session.monitor_revision > revision);
+        assert_eq!(
+            session
+                .monitor_state()
+                .records
+                .iter()
+                .find(|r| r.property_id == property)
+                .unwrap()
+                .value,
+            [0]
+        );
+    }
+    drop(session);
+    assert_eq!(
+        peer.join()
+            .unwrap()
+            .iter()
+            .filter(|&&kind| kind == 3)
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn monitor_events_and_writes_share_one_session_with_readback_and_no_retries() {
+    for reject in [false, true] {
+        let (address, peer) = simulated_meter_peer_with_monitor(reject);
+        let timeout = Duration::from_secs(1);
+        let meters = Arc::new(MixerMeterFeed::default());
+        let mut session =
+            MixerMeterSession::open(&address, 0x0001_f2ff_fefe_b9e2, timeout).unwrap();
+        session.poll(timeout).unwrap();
+        assert_eq!(
+            session.state.get(&(0x1393, 0)),
+            Some(&vec![40]),
+            "event between meter pages updates the level"
+        );
+        let before = session.monitor_revision;
+        let changes = parse_changes("monitor-level:monitor:0:28:-31").unwrap();
+        let result = session.write_monitor(&changes, Instant::now() + timeout, &meters);
+        if reject {
+            assert!(result.unwrap_err().message.contains("status 1"));
+        } else {
+            let (count, state) = result.unwrap();
+            assert_eq!(count, 1);
+            assert!(state.json().contains("\"1f\""));
+            assert!(state.revision > before);
+            session.poll(timeout).unwrap();
+            assert!(
+                session
+                    .write_monitor(&changes, Instant::now() + timeout, &meters)
+                    .unwrap_err()
+                    .conflict
+            );
+            let no_op = parse_changes("monitor-level:monitor:0:1f:-31").unwrap();
+            assert_eq!(
+                session
+                    .write_monitor(&no_op, Instant::now() + timeout, &meters)
+                    .unwrap()
+                    .0,
+                0
+            );
+            assert!(session
+                .write_monitor(&no_op, Instant::now() - timeout, &meters)
+                .is_err());
+        }
+        drop(session);
+        let trace = peer.join().unwrap();
+        assert_eq!(
+            trace.iter().filter(|&&p| p == 1).count(),
+            if reject { 2 } else { 6 }
+        );
+        assert_eq!(
+            trace.iter().filter(|&&p| p == 3).count(),
+            1,
+            "no-op, conflict, expiry and rejection never retry a setter"
+        );
+    }
+}
+
+#[test]
+fn monitor_recovery_reads_device_even_when_incremental_replies_are_empty() {
+    let (address, peer) = simulated_meter_peer_with_lost_updates(false, true);
+    let timeout = Duration::from_secs(2);
+    let worker = start_mixer_meter_worker(address, 0x0001_f2ff_fefe_b9e2, timeout);
+    let mut update = worker.meters.wait_after(0, timeout).unwrap().unwrap();
+    assert!(update
+        .meters
+        .monitor
+        .as_ref()
+        .unwrap()
+        .json()
+        .contains("\"1e\""));
+    let deadline = Instant::now() + timeout;
+    while !update
+        .meters
+        .monitor
+        .as_ref()
+        .unwrap()
+        .json()
+        .contains("\"2d\"")
+    {
+        update = worker
+            .meters
+            .wait_after(update.revision, refresh_remaining(deadline).unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(update.meters.error.is_none());
+    }
+    // This recovery happened with no browser GET or write request.
+    let (reply, stopped) = mpsc::channel();
+    worker.stop_sender.send(reply).unwrap();
+    stopped.recv_timeout(timeout).unwrap();
+    let trace = peer.join().unwrap();
+    assert!(trace.iter().filter(|&&p| p == 1).count() >= 2);
+    assert!(!trace.contains(&3));
+    assert!(
+        trace.windows(3).any(|p| p == [1, 4, 2]),
+        "meters continue between inventory pages"
+    );
+}
+
+#[test]
+fn lost_monitor_events_cannot_validate_stale_writes_or_hide_write_readback() {
+    let (address, peer) = simulated_meter_peer_with_lost_updates(false, true);
+    let timeout = Duration::from_secs(1);
+    let meters = Arc::new(MixerMeterFeed::default());
+    let mut session = MixerMeterSession::open(&address, 0x0001_f2ff_fefe_b9e2, timeout).unwrap();
+    session.poll(timeout).unwrap(); // Hardware changes to -45 without an event.
+    session.sync_state(Instant::now() + timeout).unwrap(); // Empty successful reply leaves cached -30.
+    assert_eq!(session.state.get(&(0x1393, 0)), Some(&vec![30]));
+    let stale = parse_changes("monitor-level:monitor:0:1e:-31").unwrap();
+    assert!(
+        session
+            .write_monitor(&stale, Instant::now() + timeout, &meters)
+            .unwrap_err()
+            .conflict
+    );
+    assert_eq!(session.state.get(&(0x1393, 0)), Some(&vec![45]));
+    let desired = parse_changes("monitor-level:monitor:0:2d:-44").unwrap();
+    let (count, state) = session
+        .write_monitor(&desired, Instant::now() + timeout, &meters)
+        .unwrap();
+    assert_eq!(count, 1);
+    assert!(
+        state.json().contains("\"2c\""),
+        "readback must come from hardware without an incremental event"
+    );
+    drop(session);
+    let trace = peer.join().unwrap();
+    assert_eq!(
+        trace.iter().filter(|&&p| p == 3).count(),
+        1,
+        "conflicting write is never sent"
+    );
+}
+
+#[test]
+fn a_monitor_event_after_its_inventory_page_survives_snapshot_commit() {
+    let (address, peer) = simulated_meter_peer_with_monitor(false);
+    let timeout = Duration::from_secs(1);
+    let meters = Arc::new(MixerMeterFeed::default());
+    let mut session = MixerMeterSession::open(&address, 0x0001_f2ff_fefe_b9e2, timeout).unwrap();
+    // The inventory page contains -30, then the interleaved meter exchange
+    // delivers a newer -40 event before the inventory's terminal page.
+    session
+        .read_state(Instant::now() + timeout, &meters)
+        .unwrap();
+    assert_eq!(session.state.get(&(0x1393, 0)), Some(&vec![40]));
+    assert!(session.snapshot_events.is_none());
+    assert!(!meters.snapshot().unwrap().meters.records.is_empty());
+    drop(session);
+    assert!(!peer.join().unwrap().contains(&3));
 }

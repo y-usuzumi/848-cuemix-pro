@@ -23,11 +23,26 @@ pub(crate) struct ConsoleChange {
     value: String,
 }
 
+pub(crate) fn is_monitor_changes(changes: &[ConsoleChange]) -> bool {
+    !changes.is_empty()
+        && changes.iter().all(|change| {
+            matches!(
+                change.operation.as_str(),
+                "monitor-level"
+                    | "monitor-select"
+                    | "monitor-members"
+                    | "monitor-mute"
+                    | "monitor-mono"
+                    | "monitor-talk"
+            )
+        })
+}
+
 #[derive(Debug, PartialEq)]
-struct WriteRecord {
-    property: u16,
-    index: u16,
-    value: Vec<u8>,
+pub(super) struct WriteRecord {
+    pub(super) property: u16,
+    pub(super) index: u16,
+    pub(super) value: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -44,7 +59,8 @@ fn relevant(property: u16) -> bool {
         0x0403 | 0x0404 | 0x0411 | 0x0412 |
         0x841a | 0x842b | 0x0420 | 0x0421 | 0x0429 |
         0x842e | 0x843f | 0x0434 | 0x0435 | 0x043c | 0x043d |
-        0x0448 | 0x0449 | 0x93ac..=0x93b1 | 0x1b5b)
+        0x0448 | 0x0449 | 0x93ac..=0x93b1 | 0x1b5b |
+        0x1388 | 0x1393 | 0x1394 | 0x139a | 0x139b | 0x13a3 | 0x13b6 | 0x93b9)
 }
 
 impl ConsoleState {
@@ -133,7 +149,20 @@ impl ConsoleState {
                 sources.insert(vec![0x13, 0xad, bank, index as u8]);
             }
         }
+        if self.monitor_available() {
+            for bank in 0..3 {
+                for channel in 0..2 {
+                    sources.insert(vec![0x13, 0xb9, bank, channel]);
+                }
+            }
+        }
         sources
+    }
+
+    fn monitor_available(&self) -> bool {
+        matches!(self.get(0x13b6, 0), Ok([0..=7]))
+            && self.indices(0x93b9).collect::<Vec<_>>() == [0, 1]
+            && (0..2).all(|i| self.get(0x93b9, i).is_ok_and(|v| v.len() == 4))
     }
 
     fn resolve(&self, change: &ConsoleChange) -> Result<WriteRecord, String> {
@@ -146,13 +175,76 @@ impl ConsoleState {
                     "network" => 0x93af,
                     "host" => 0x93b0,
                     "phones" => 0x93b1,
+                    "monitor" if self.monitor_available() && change.index < 2 => 0x93b9,
                     _ => return Err("unknown routing destination group".into()),
                 };
                 let path = unhex(&change.value)?;
                 if !self.sources().contains(&path) {
                     return Err("source is not advertised by this device".into());
                 }
+                if path.starts_with(&[0x13, 0xb9]) && matches!(property, 0x93ad | 0x93b9) {
+                    return Err(
+                        "ABC monitor outputs cannot feed the mixer or their own input".into(),
+                    );
+                }
                 (property, change.index, path)
+            }
+            "monitor-select" | "monitor-level" | "monitor-members" | "monitor-mute"
+            | "monitor-mono" | "monitor-talk" => {
+                if change.target != "monitor" || change.index != 0 || !self.monitor_available() {
+                    return Err("monitor controls are not advertised by this device".into());
+                }
+                match change.operation.as_str() {
+                    "monitor-mute" | "monitor-mono" | "monitor-talk" => {
+                        // Installed-client kMuteEnable / kMonoEnable / kTalkbackEnable setters
+                        // serialize one boolean at index zero. These are separate
+                        // latches; never emulate them with trims or speaker masks.
+                        let property = match change.operation.as_str() {
+                            "monitor-mute" => 0x139b,
+                            "monitor-mono" => 0x139a,
+                            _ => 0x13a3,
+                        };
+                        if !matches!(self.get(property, 0)?, [0 | 1]) {
+                            return Err("unexpected monitor button state".into());
+                        }
+                        (property, 0, vec![parse_bool(&change.value)?])
+                    }
+                    "monitor-select" => {
+                        let mask = change
+                            .value
+                            .parse::<u8>()
+                            .map_err(|_| "invalid ABC selection")?;
+                        if mask > 7 {
+                            return Err("ABC selection may only contain A, B, and C".into());
+                        }
+                        (0x13b6, 0, vec![mask])
+                    }
+                    "monitor-level" => {
+                        if !matches!(self.get(0x1393, 0)?, [0..=100]) {
+                            return Err("unexpected monitor attenuation".into());
+                        }
+                        let trim = super::OutputTrim::parse(&change.value)?;
+                        (0x1393, 0, vec![trim.attenuation()])
+                    }
+                    _ => {
+                        let mask = change
+                            .value
+                            .parse::<u16>()
+                            .map_err(|_| "invalid monitor membership")?;
+                        let allowed = self
+                            .indices(0x1388)
+                            .filter(|&i| i < 12)
+                            .fold(0_u16, |bits, i| bits | (1 << i));
+                        let current = self.get(0x1394, 0)?;
+                        if current.len() != 2
+                            || allowed == 0
+                            || (mask | u16::from_be_bytes([current[0], current[1]])) & !allowed != 0
+                        {
+                            return Err("monitor membership exceeds the mapped line outputs".into());
+                        }
+                        (0x1394, 0, mask.to_be_bytes().to_vec())
+                    }
+                }
             }
             "level" | "pan" => {
                 if change.index > 255 {
@@ -258,7 +350,7 @@ impl ConsoleState {
         }
     }
 
-    fn prepare(&self, changes: &[ConsoleChange]) -> Result<Vec<WriteRecord>, String> {
+    pub(super) fn prepare(&self, changes: &[ConsoleChange]) -> Result<Vec<WriteRecord>, String> {
         let mut keys = BTreeSet::new();
         let mut result = Vec::new();
         for change in changes {
@@ -288,7 +380,7 @@ pub(crate) fn parse_changes(input: &str) -> Result<Vec<ConsoleChange>, String> {
             .parse::<u16>()
             .map_err(|_| "invalid console channel index")?;
         let expected = unhex(parts[3])?;
-        if !matches!(expected.len(), 1 | 4) {
+        if !matches!(expected.len(), 1 | 2 | 4) {
             return Err("invalid previous control value".into());
         }
         changes.push(ConsoleChange {
@@ -407,7 +499,7 @@ pub(crate) fn write_console(
     Ok(writes.len())
 }
 
-fn validate_ack(payload: &[u8]) -> Result<(), String> {
+pub(super) fn validate_ack(payload: &[u8]) -> Result<(), String> {
     if payload.len() < 28 {
         return Err("truncated console acknowledgement".into());
     }

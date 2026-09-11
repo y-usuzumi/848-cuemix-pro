@@ -7,6 +7,24 @@
   let model = null, loading = false, writing = false, online = false, epoch = 0;
   let selectedView = '', loadedHost = '', lastRead = 0;
   let refreshTask = null, deferredSnapshot = null;
+  let outputGeneration = 0;
+  const monitorSync = CueMixMonitor.createSync({
+    async send(changes) {
+      if (writing || !online || loadedHost !== el('host').value ||
+          (typeof outputWritePending !== 'undefined' && outputWritePending) ||
+          (typeof headphoneWritePending !== 'undefined' && headphoneWritePending)) throw Error('Another output change is saving. Try again when it finishes.');
+      outputGeneration++;
+      const response=await fetch('/api/console/changes',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:qs({host:loadedHost,token:sessionToken,changes:M.serialize(changes)})});
+      const result=await response.json();
+      if(!response.ok || result.error) throw Error(result.error || `HTTP ${response.status}`);
+      return result;
+    },
+    onState(confirmed,display) {
+      if(model) for(const [p,i,value] of confirmed.records) model.records.set(M.key(p,i),value);
+      if(selectedView==='outputs') CueMixMonitor.syncDom(display);
+    },
+    onStatus: (message,state='')=>status(message,state),
+  });
   let patchPage = 0, matrixRowPage = 0, matrixColPage = 0;
   let drafts = new Map();
   const dbText = db => db === null ? 'Unavailable' : db === -Infinity ? '−∞ dB' : `${db > 0 ? '+' : ''}${db.toFixed(1)} dB`;
@@ -21,7 +39,7 @@
   function availability() {
     document.querySelectorAll('.console-panel').forEach(panel => {
       panel.dataset.offline = String(!online);
-      panel.querySelectorAll('[data-control], [data-route], #stagePatch').forEach(control => { control.disabled = writing || !online || control.dataset.unavailable === 'true'; });
+      panel.querySelectorAll('[data-control], [data-route], [data-monitor-edit], #stagePatch').forEach(control => { control.disabled = writing || !online || control.dataset.unavailable === 'true'; });
     });
     el('applyRoutes').disabled = writing || !online || !drafts.size || hasConflict();
     el('discardRoutes').disabled = writing;
@@ -53,9 +71,11 @@
   }
   function acceptSnapshot(snapshot) {
     model = M.create(snapshot);
+    monitorSync.seed(snapshot);
+    for(const [p,i,value] of monitorSync.snapshot().records) model.records.set(M.key(p,i),value);
     refreshChoices(); render();
   }
-  function editingStrip() { return document.activeElement?.closest('.console-strip'); }
+  function editingStrip() { return document.activeElement?.closest('.console-strip, #monitorControls'); }
   function refresh({ quiet = false, force = false, afterWrite = false } = {}) {
     if (loading) return refreshTask;
     if ((writing && !afterWrite) || (!views.includes(selectedView) && !force) || (document.hidden && !force)) return Promise.resolve(false);
@@ -90,6 +110,11 @@
     if (selectedView === 'routing') renderMatrix();
     if (selectedView === 'mixer') renderMixer();
     if (selectedView === 'aux') renderAux();
+    if (selectedView === 'outputs') {
+      const open = el('monitorSetup')?.open;
+      if(!monitorSync.busy()) el('monitorControls').innerHTML = CueMixMonitor.render(model, drafts, open);
+      CueMixMonitor.syncDom(monitorSync.display());
+    }
     renderDrafts(); availability();
     if (typeof lastMeterRecords !== 'undefined') meters(lastMeterRecords);
   }
@@ -122,6 +147,7 @@
   }
   function stage(destination, source) {
     if (!online || writing || !model.sourceMap.has(source)) return;
+    if (source.startsWith('13b9') && ['mixer', 'monitor'].includes(destination.group)) throw Error('ABC outputs cannot feed the mixer or their own input.');
     const id = M.key(destination.property, destination.index);
     const prior = drafts.get(id);
     if (source === destination.source) drafts.delete(id);
@@ -149,7 +175,7 @@
   }
   function renderDrafts() {
     const tray = el('consoleDraftTray');
-    tray.hidden = !drafts.size || !['patchbay', 'routing'].includes(selectedView);
+    tray.hidden = !drafts.size || !['patchbay', 'routing', 'outputs'].includes(selectedView);
     el('draftCount').textContent = `${drafts.size} staged connection${drafts.size === 1 ? '' : 's'}`;
     el('draftHint').textContent = hasConflict() ? 'Some device routes changed. Remove those edits and stage them again.' : 'Your hardware changes only when you apply.';
     el('draftList').innerHTML = [...drafts.values()].map(d => `<div class="draft-row${model.records.get(d.id) !== d.expected ? ' draft-conflict' : ''}"><span><strong>${escape(d.label)}</strong>: ${escape(model.sourceName(d.expected))} → ${escape(model.sourceName(d.value))}${model.records.get(d.id) !== d.expected ? ' · Device changed' : ''}</span><button class="secondary" data-remove-draft="${d.id}" aria-label="Remove staged connection for ${escape(d.label)}">Remove</button></div>`).join('');
@@ -199,7 +225,12 @@
   }
   async function apply(changes, description, routing = false) {
     if (!changes.length || writing || !online || loadedHost !== el('host').value) return;
+    if(monitorSync.busy()) {status('Wait for the monitor change to finish saving, then try again.');return;}
+    if ((typeof outputWritePending !== 'undefined' && outputWritePending) || (typeof headphoneWritePending !== 'undefined' && headphoneWritePending)) {
+      status('Wait for the output level to finish saving, then try again.'); return;
+    }
     const host = loadedHost, generation = epoch;
+    outputGeneration++;
     writing = true; deferredSnapshot = null; availability(); status(`Saving ${description}…`);
     let failure = null;
     try {
@@ -229,6 +260,7 @@
     const { control: operation, target, index: rawIndex } = node.dataset;
     const index = Number(rawIndex);
     let value = node.dataset.value ?? node.value;
+    if (operation === 'monitor-level' && Number(value) === -100) value = '-inf';
     if (operation === 'level' || operation === 'master') {
       value = String(value).trim().replace('−','-');
       if (value === '−∞' || value === '-∞' || (node.type === 'range' && Number(value) <= -91)) value = '-inf';
@@ -275,12 +307,19 @@
     }
     if (button.dataset.route) run(() => { stage(model.destinations.find(d => d.id === button.dataset.route), button.dataset.source); render(); });
     if (button.dataset.removeDraft && !writing) { drafts.delete(button.dataset.removeDraft); render(); }
-    if (button.dataset.control) run(() => { apply(controlChanges(button), button.getAttribute('aria-label') || 'mix setting'); });
+    if (button.dataset.control) run(() => {
+      if(button.dataset.control.startsWith('monitor-')) monitorSync.queue(button.dataset.control,button.dataset.value);
+      else apply(controlChanges(button), button.getAttribute('aria-label') || 'mix setting');
+    });
   });
   document.addEventListener('input', event => {
     const node = event.target;
     if (!node.dataset.control || node.type !== 'range') return;
-    if (['level','master'].includes(node.dataset.control)) {
+    if (node.dataset.control === 'monitor-level') {
+      const text = CueMixMonitor.volumeText(Number(node.value));
+      el('monitorLevelValue').textContent = text; node.setAttribute('aria-valuetext', text);
+      run(()=>monitorSync.queue('monitor-level',Number(node.value)===-100?'-inf':node.value));
+    } else if (['level','master'].includes(node.dataset.control)) {
       const db = Number(node.value) <= -91 ? -Infinity : Number(node.value);
       const strip = node.closest('.console-strip');
       strip.querySelector('.console-value').textContent = dbText(db);
@@ -290,7 +329,26 @@
   });
   document.addEventListener('change', event => {
     const node = event.target;
-    if (node.dataset.control && node.type === 'range') run(() => { apply(controlChanges(node), node.getAttribute('aria-label') || 'mix setting'); });
+    if (node.dataset.monitorMember !== undefined) run(() => {
+      const bit = 1 << Number(node.dataset.monitorMember), mask = M.number(model.get(0x1394, 0));
+      const displayed = monitorSync.display().records.find(r=>r[0]===0x1394);
+      const current = displayed ? parseInt(displayed[2],16) : mask;
+      monitorSync.queue('monitor-members',node.checked ? current | bit : current & ~bit);
+    });
+    if (node.dataset.monitorInput !== undefined) run(() => {
+      stage(model.destinations.find(d => d.group === 'monitor' && d.index === Number(node.dataset.monitorInput)), node.value);
+      render(); status('Monitor input staged. Review and apply the connections below.');
+    });
+    if (node.dataset.monitorPair !== undefined) run(() => {
+      const prior = new Map(drafts);
+      try { for (const c of CueMixMonitor.pairChanges(model, drafts, Number(node.dataset.monitorPair), node.value)) stage(c.destination, c.source); }
+      catch (error) { drafts = prior; throw error; }
+      render(); status('Speaker connections staged. Review and apply below.');
+    });
+    if (node.dataset.control && node.type === 'range') run(() => {
+      if(node.dataset.control==='monitor-level') monitorSync.queue('monitor-level',Number(node.value)===-100?'-inf':node.value);
+      else apply(controlChanges(node), node.getAttribute('aria-label') || 'mix setting');
+    });
   });
   document.addEventListener('focusout', event => {
     const node = event.target;
@@ -315,12 +373,31 @@
   for (const id of ['patchSearch','mixSearch']) el(id).addEventListener('input', () => { patchPage = 0; render(); });
   el('mixActiveOnly').addEventListener('change', render);
   el('sourceSearch').addEventListener('input', refreshBuilder);
-  el('host').addEventListener('change', () => { epoch++; loading = writing = online = false; refreshTask = deferredSnapshot = null; model = null; drafts.clear(); loadedHost = ''; lastRead = 0; refresh({force:true}); });
+  el('host').addEventListener('change', () => { epoch++; monitorSync.reset(); loading = writing = online = false; refreshTask = deferredSnapshot = null; model = null; drafts.clear(); loadedHost = ''; lastRead = 0; refresh({force:true}); });
   // Poll even during edits; defer adopting results until focus leaves the strip.
   setInterval(() => { if (!document.hidden && views.includes(selectedView)) refresh({quiet:true}); }, 5000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh({force:true,quiet:true}); });
   globalThis.consoleUi = {
-    activate(view) { selectedView = view; el('consoleDraftTray').hidden = !drafts.size || !['patchbay','routing'].includes(view); if (views.includes(view)) refresh(); },
+    activate(view) { selectedView = view; el('consoleDraftTray').hidden = !drafts.size || !['patchbay','routing','outputs'].includes(view); if (views.includes(view)) refresh(); else if (view === 'outputs' && model) render(); },
+    busy: () => writing || monitorSync.busy(),
+    monitorState(snapshot, healthy) { if(healthy && !writing) monitorSync.receive(snapshot); },
+    outputRevision: () => `${epoch}:${outputGeneration}`,
+    outputs(snapshot, host, revision, monitor) {
+      if (writing || host !== el('host').value || (revision !== undefined ? revision !== `${epoch}:${outputGeneration}` : outputGeneration !== 0)) return;
+      if (!snapshot) { this.outputsError(Error('Monitoring snapshot is unavailable'), host, revision); return; }
+      try {
+        if(monitor) monitorSync.receive(monitor);
+        if (editingStrip() && model) deferredSnapshot = snapshot;
+        else { deferredSnapshot = null; acceptSnapshot(snapshot); }
+        loadedHost = host; online = true; lastRead = Date.now();
+        status(`Monitoring updated ${new Date().toLocaleTimeString()}`); availability();
+      } catch (error) { this.outputsError(error, host, revision); }
+    },
+    outputsError(error, host, revision) {
+      if (writing || host !== el('host').value || (revision !== undefined && revision !== `${epoch}:${outputGeneration}`)) return;
+      online = !!model && loadedHost === host && Date.now() - lastRead < 15000;
+      status(`Cannot refresh monitoring: ${error.message}. ${online ? 'Retrying automatically.' : 'Editing is paused.'}`, 'error'); availability();
+    },
     meters,
   };
   consoleUi.activate(document.querySelector('[role="tab"][aria-selected="true"]')?.dataset.tab || 'inputs');

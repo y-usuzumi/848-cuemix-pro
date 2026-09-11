@@ -28,7 +28,9 @@ mod avdecc_probe;
 
 #[path = "avdecc_console.rs"]
 mod avdecc_console;
-pub(crate) use avdecc_console::{parse_changes, write_console};
+pub(crate) use avdecc_console::{
+    is_monitor_changes, parse_changes, write_console, ConsoleChange, ConsoleWriteError,
+};
 
 pub(crate) use avdecc_probe::{probe, write_probe_result, DescriptorRead};
 
@@ -50,6 +52,7 @@ pub(crate) struct MixerMeters {
     pub(crate) records: Vec<MixerMeterRecord>,
     pub(crate) updated_at: Option<Instant>,
     pub(crate) error: Option<String>,
+    pub(crate) monitor: Option<MonitorState>,
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +76,11 @@ pub(crate) struct MixerMeterFeed {
 }
 
 impl MixerMeterFeed {
+    fn publish_monitor(&self, monitor: MonitorState) {
+        if let Ok(mut state) = self.state.lock() {
+            state.meters.monitor = Some(monitor);
+        }
+    }
     pub(crate) fn snapshot(&self) -> Result<MixerMeterFeedSnapshot, String> {
         self.state
             .lock()
@@ -331,7 +339,7 @@ fn set_mixer_fader_once(
     Ok(())
 }
 
-pub(crate) struct VendorSnapshot(Vec<VendorStateRecord>);
+pub(crate) struct VendorSnapshot(Vec<VendorStateRecord>, pub(crate) MonitorState);
 
 impl VendorSnapshot {
     pub(crate) fn console(self) -> Result<avdecc_console::ConsoleState, String> {
@@ -355,9 +363,63 @@ pub(crate) struct VendorSnapshotRequest {
     pub(crate) reply: mpsc::Sender<Result<VendorSnapshot, String>>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct MonitorState {
+    records: Vec<VendorStateRecord>,
+    revision: u64,
+}
+
+fn next_monitor_revision() -> u64 {
+    // Start above revisions from an earlier server process so an open page
+    // accepts a reconnect without needing a reload. Milliseconds fit exactly
+    // in a JavaScript Number; the atomic counter orders same-millisecond reads.
+    static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    REVISION
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |previous| Some(now.max(previous + 1)),
+        )
+        .map(|previous| now.max(previous + 1))
+        .unwrap()
+}
+
+impl MonitorState {
+    pub(crate) fn json(&self) -> String {
+        let records = self
+            .records
+            .iter()
+            .map(|r| {
+                format!(
+                    "[{}, {}, \"{}\"]",
+                    r.property_id,
+                    r.property_index,
+                    r.value
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{{\"records\":[{records}],\"revision\":{}}}", self.revision)
+    }
+}
+
+pub(crate) struct MonitorWriteRequest {
+    pub(crate) deadline: Instant,
+    pub(crate) changes: Vec<ConsoleChange>,
+    pub(crate) reply: mpsc::Sender<Result<(usize, MonitorState), ConsoleWriteError>>,
+}
+
 pub(crate) struct MixerMeterWorker {
     pub(crate) stop_sender: mpsc::Sender<mpsc::Sender<()>>,
     pub(crate) state_sender: mpsc::Sender<VendorSnapshotRequest>,
+    pub(crate) monitor_sender: mpsc::Sender<MonitorWriteRequest>,
     pub(crate) meters: Arc<MixerMeterFeed>,
 }
 
@@ -721,7 +783,7 @@ fn output_channels_from_state(
     Ok(channels.into_iter().collect())
 }
 
-/// One read-only proxy session owns metering and fresh inventory reads.
+/// One proxy session owns meters, incremental reads and explicit monitor writes.
 /// Background refreshes keep this session and its SSE feed alive.
 pub(crate) fn start_mixer_meter_worker(
     host: String,
@@ -730,6 +792,7 @@ pub(crate) fn start_mixer_meter_worker(
 ) -> MixerMeterWorker {
     let (stop_sender, stop_receiver) = mpsc::channel();
     let (state_sender, state_receiver) = mpsc::channel();
+    let (monitor_sender, monitor_receiver) = mpsc::channel();
     let meters = Arc::new(MixerMeterFeed::default());
     let worker_meters = Arc::clone(&meters);
     thread::spawn(move || {
@@ -739,12 +802,14 @@ pub(crate) fn start_mixer_meter_worker(
             timeout,
             stop_receiver,
             state_receiver,
+            monitor_receiver,
             worker_meters,
         )
     });
     MixerMeterWorker {
         stop_sender,
         state_sender,
+        monitor_sender,
         meters,
     }
 }
@@ -755,6 +820,7 @@ fn run_mixer_meter_worker(
     timeout: Duration,
     stop_receiver: mpsc::Receiver<mpsc::Sender<()>>,
     state_receiver: mpsc::Receiver<VendorSnapshotRequest>,
+    monitor_receiver: mpsc::Receiver<MonitorWriteRequest>,
     meters: Arc<MixerMeterFeed>,
 ) {
     const RETRY_DELAY: Duration = Duration::from_millis(500);
@@ -773,6 +839,14 @@ fn run_mixer_meter_worker(
                     let _ = reply.send(());
                     return;
                 }
+                if let Ok(request) = monitor_receiver.try_recv() {
+                    let result = session.write_monitor(&request.changes, request.deadline, &meters);
+                    let reconnect = result.as_ref().err().is_some_and(|e| !e.conflict);
+                    let _ = request.reply.send(result);
+                    if reconnect {
+                        break;
+                    }
+                }
                 if let Ok(request) = state_receiver.try_recv() {
                     if Instant::now() >= request.deadline {
                         let _ = request
@@ -781,15 +855,31 @@ fn run_mixer_meter_worker(
                     } else {
                         let result = session.read_state(request.deadline, &meters);
                         let error = result.as_ref().err().cloned();
-                        let _ = request.reply.send(result.map(VendorSnapshot));
+                        let _ = request.reply.send(
+                            result.map(|records| VendorSnapshot(records, session.monitor_state())),
+                        );
                         if let Some(error) = error {
                             update_mixer_meters(&meters, Vec::new(), Some(error));
                             break;
                         }
                     }
                 }
+                let refresh = if session.last_reconciled.elapsed() >= Duration::from_millis(500) {
+                    session
+                        .read_state(Instant::now() + timeout, &meters)
+                        .map(|_| ())
+                } else {
+                    session.sync_state(Instant::now() + timeout)
+                };
+                if let Err(error) = refresh {
+                    update_mixer_meters(&meters, Vec::new(), Some(error));
+                    break;
+                }
                 match session.poll(timeout) {
-                    Ok(records) => update_mixer_meters(&meters, records, None),
+                    Ok(records) => {
+                        meters.publish_monitor(session.monitor_state());
+                        update_mixer_meters(&meters, records, None);
+                    }
                     Err(error) => {
                         update_mixer_meters(&meters, Vec::new(), Some(error));
                         break;
@@ -820,6 +910,11 @@ struct MixerMeterSession {
     target_entity_id: u64,
     controller_entity_id: u64,
     next_sequence: u16,
+    state_sequence: u16,
+    state: BTreeMap<(u16, u16), Vec<u8>>,
+    monitor_revision: u64,
+    last_reconciled: Instant,
+    snapshot_events: Option<BTreeMap<(u16, u16), Vec<u8>>>,
 }
 
 impl MixerMeterSession {
@@ -830,13 +925,21 @@ impl MixerMeterSession {
             .request_entity_id(CUE_MIX_PROXY_ADDRESS, timeout)?
             .entity_id
             .ok_or("AVDECC Proxy did not return a controller identity")?;
-        let (next_sequence, _) =
+        let (next_sequence, records) =
             proxy.start_vendor_state(target_entity_id, controller_entity_id, timeout)?;
         Ok(Self {
             proxy,
             target_entity_id,
             controller_entity_id,
             next_sequence,
+            state_sequence: next_sequence.wrapping_sub(1),
+            state: records
+                .into_iter()
+                .map(|r| ((r.property_id, r.property_index), r.value))
+                .collect(),
+            monitor_revision: next_monitor_revision(),
+            last_reconciled: Instant::now(),
+            snapshot_events: None,
         })
     }
 
@@ -867,6 +970,7 @@ impl MixerMeterSession {
                 sequence,
                 METER_PROTOCOL,
             ) else {
+                self.receive_state_event(&frame)?;
                 continue;
             };
             records.extend(parse_mixer_meter_page(data)?);
@@ -875,40 +979,183 @@ impl MixerMeterSession {
         Ok(records)
     }
 
+    fn state_records(&self) -> Vec<VendorStateRecord> {
+        self.state
+            .iter()
+            .map(
+                |(&(property_id, property_index), value)| VendorStateRecord {
+                    property_id,
+                    property_index,
+                    value: value.clone(),
+                },
+            )
+            .collect()
+    }
+
+    fn monitor_state(&self) -> MonitorState {
+        MonitorState {
+            records: self
+                .state
+                .iter()
+                .filter(|((p, i), _)| {
+                    *i == 0 && matches!(*p, 0x1393 | 0x1394 | 0x139a | 0x139b | 0x13a3 | 0x13b6)
+                })
+                .map(
+                    |(&(property_id, property_index), value)| VendorStateRecord {
+                        property_id,
+                        property_index,
+                        value: value.clone(),
+                    },
+                )
+                .collect(),
+            revision: self.monitor_revision,
+        }
+    }
+
+    fn apply_state(&mut self, data: &[u8]) -> Result<(), String> {
+        let records = parse_vendor_state_records(data)?;
+        for record in records {
+            if record.property_index == 0
+                && matches!(
+                    record.property_id,
+                    0x1393 | 0x1394 | 0x139a | 0x139b | 0x13a3 | 0x13b6
+                )
+                && self.state.get(&(record.property_id, 0)) != Some(&record.value)
+            {
+                self.monitor_revision = next_monitor_revision();
+            }
+            self.state
+                .insert((record.property_id, record.property_index), record.value);
+        }
+        if self.state.len() > 10000 {
+            return Err("vendor state exceeds record limit".into());
+        }
+        Ok(())
+    }
+
+    fn receive_state_event(&mut self, frame: &AppFrame) -> Result<(), String> {
+        if let Ok(data) = vendor_response_data(
+            frame,
+            self.target_entity_id,
+            self.controller_entity_id,
+            self.state_sequence,
+            [0, 1, 0xf2, 0, 0, 1],
+        ) {
+            avdecc_console::validate_ack(&frame.payload)?;
+            if let Some(events) = self.snapshot_events.as_mut() {
+                for record in parse_vendor_state_records(data)? {
+                    events.insert((record.property_id, record.property_index), record.value);
+                }
+                if events.len() > 10000 {
+                    return Err("vendor state events exceed record limit".into());
+                }
+            }
+            self.apply_state(data)?;
+        }
+        Ok(())
+    }
+
+    fn exchange(
+        &mut self,
+        protocol: [u8; 6],
+        data: &[u8],
+        deadline: Instant,
+    ) -> Result<(u16, AppFrame), String> {
+        refresh_remaining(deadline)?;
+        let sequence = self.next_sequence;
+        self.next_sequence = sequence.wrapping_add(1);
+        self.proxy.write_vendor_request(
+            self.target_entity_id,
+            self.controller_entity_id,
+            sequence,
+            protocol,
+            data,
+        )?;
+        loop {
+            let frame = self
+                .proxy
+                .read_frame_until(deadline)?
+                .ok_or("timed out waiting for device response")?;
+            if vendor_response_data(
+                &frame,
+                self.target_entity_id,
+                self.controller_entity_id,
+                sequence,
+                protocol,
+            )
+            .is_ok()
+            {
+                avdecc_console::validate_ack(&frame.payload)?;
+                return Ok((sequence, frame));
+            }
+            self.receive_state_event(&frame)?;
+        }
+    }
+
     fn read_state(
         &mut self,
         deadline: Instant,
         meters: &Arc<MixerMeterFeed>,
     ) -> Result<Vec<VendorStateRecord>, String> {
+        // A successful empty re-arm is not proof that our cached values are
+        // current. Restart the read-only inventory on this same connection.
+        // Keep live events received during the scan newer than its pages.
+        self.snapshot_events = Some(BTreeMap::new());
+        let result = self.read_inventory(deadline, meters);
+        let events = self.snapshot_events.take().unwrap_or_default();
+        let mut inventory = result?;
+        inventory.extend(events);
+        if inventory.len() > 10000 {
+            return Err("vendor state exceeds record limit".into());
+        }
+        self.state = inventory;
+        self.monitor_revision = next_monitor_revision();
+        self.last_reconciled = Instant::now();
+        meters.publish_monitor(self.monitor_state());
+        Ok(self.state_records())
+    }
+
+    fn read_inventory(
+        &mut self,
+        deadline: Instant,
+        meters: &Arc<MixerMeterFeed>,
+    ) -> Result<BTreeMap<(u16, u16), Vec<u8>>, String> {
         const PROTOCOL: [u8; 6] = [0, 1, 0xf2, 0, 0, 1];
-        // An empty request starts a fresh inventory, even on an existing
-        // session. ACK only the preceding STATE sequence; meter requests
-        // share the sequence counter but are not part of that ACK chain.
         let mut previous = Vec::new();
-        let mut records = Vec::new();
+        let mut inventory = BTreeMap::new();
         let mut last_meter = Instant::now();
         for _ in 0..256 {
-            let sequence = self.next_sequence;
-            self.next_sequence = sequence.wrapping_add(1);
-            let response = self.proxy.vendor_request(
-                self.target_entity_id,
-                self.controller_entity_id,
-                sequence,
-                PROTOCOL,
-                &previous,
-                refresh_remaining(deadline)?,
-            )?;
-            let state = vendor_response_data(
+            let (sequence, response) = self.exchange(PROTOCOL, &previous, deadline)?;
+            let data = vendor_response_data(
                 &response,
                 self.target_entity_id,
                 self.controller_entity_id,
                 sequence,
                 PROTOCOL,
             )?;
-            if state.is_empty() {
-                return Ok(records);
+            self.state_sequence = sequence;
+            if data.is_empty() {
+                if inventory.is_empty() {
+                    return Err("device returned an empty state inventory".into());
+                }
+                return Ok(inventory);
             }
-            records.extend(parse_vendor_state_records(state)?);
+            for record in parse_vendor_state_records(data)? {
+                // This page is newer than events received before it. Events
+                // arriving after this property's page are overlaid at commit.
+                if let Some(events) = self.snapshot_events.as_mut() {
+                    events.remove(&(record.property_id, record.property_index));
+                }
+                if inventory
+                    .insert((record.property_id, record.property_index), record.value)
+                    .is_some()
+                {
+                    return Err("device supplied duplicate state records".into());
+                }
+            }
+            if inventory.len() > 10000 {
+                return Err("vendor state exceeds record limit".into());
+            }
             previous = sequence.to_be_bytes().to_vec();
             if last_meter.elapsed() >= Duration::from_millis(20) {
                 let samples = self.poll(refresh_remaining(deadline)?)?;
@@ -916,7 +1163,71 @@ impl MixerMeterSession {
                 last_meter = Instant::now();
             }
         }
-        Err("CueMix vendor-state snapshot exceeded 256 pages".into())
+        Err("CueMix vendor-state inventory exceeded 256 pages".into())
+    }
+
+    fn sync_state(&mut self, deadline: Instant) -> Result<(), String> {
+        const PROTOCOL: [u8; 6] = [0, 1, 0xf2, 0, 0, 1];
+        // Continue the captured re-arm chain, including empty responses.
+        // An empty REQUEST would restart all 9,307 records. Keep the state
+        // sequence independent from intervening meter and setter sequences.
+        for _ in 0..256 {
+            let (sequence, response) =
+                self.exchange(PROTOCOL, &self.state_sequence.to_be_bytes(), deadline)?;
+            let state = vendor_response_data(
+                &response,
+                self.target_entity_id,
+                self.controller_entity_id,
+                sequence,
+                PROTOCOL,
+            )?;
+            self.state_sequence = sequence;
+            if state.is_empty() {
+                return Ok(());
+            }
+            self.apply_state(state)?;
+        }
+        Err("CueMix incremental state exceeded 256 pages".into())
+    }
+
+    fn write_monitor(
+        &mut self,
+        changes: &[ConsoleChange],
+        deadline: Instant,
+        meters: &Arc<MixerMeterFeed>,
+    ) -> Result<(usize, MonitorState), ConsoleWriteError> {
+        let error = |message: String| ConsoleWriteError {
+            applied: 0,
+            conflict: message.starts_with("conflict:"),
+            message,
+        };
+        if !is_monitor_changes(changes) {
+            return Err(error("only monitor controls use the live session".into()));
+        }
+        self.read_state(deadline, meters).map_err(error)?;
+        let state =
+            avdecc_console::ConsoleState::from_records(self.state_records()).map_err(error)?;
+        let writes = state.prepare(changes).map_err(error)?;
+        for (applied, record) in writes.iter().enumerate() {
+            let mut payload = Vec::new();
+            payload.extend(record.property.to_be_bytes());
+            payload.extend(record.index.to_be_bytes());
+            payload.push(record.value.len() as u8);
+            payload.extend(&record.value);
+            self.exchange([0, 1, 0xf2, 0, 0, 3], &payload, deadline)
+                .map_err(|message| ConsoleWriteError {
+                    applied,
+                    conflict: false,
+                    message: format!("{message}; last write outcome unknown; no automatic retry"),
+                })?;
+        }
+        self.read_state(deadline, meters)
+            .map_err(|message| ConsoleWriteError {
+                applied: writes.len(),
+                conflict: false,
+                message,
+            })?;
+        Ok((writes.len(), self.monitor_state()))
     }
 }
 

@@ -49,6 +49,10 @@ globalThis.CueMixModel = (() => {
     for (const [property, bank, group, prefix] of [[0x03e8, 0, 'Mixer direct outs', 'Post FX'], [0x0420, 1, 'Main mix', 'Main'], [0x0448, 2, 'Monitor mix', 'Mix Monitor'], [0x0403, 3, 'Aux mixes', 'Aux'], [0x0434, 4, 'Reverb', 'Reverb']]) {
       for (const i of indices(property).filter(i => i < 256)) sources.push({ id: path(0x13ad, bank, i), name: `${prefix} ${i + 1}`, group });
     }
+    const monitorAvailable = get(0x13b6, 0)?.length === 2 && /^[0-7]$/.test(String(number(get(0x13b6, 0)))) && indices(0x93b9).join(',') === '0,1' && [0, 1].every(i => get(0x93b9, i)?.length === 8);
+    if (monitorAvailable) for (let bank = 0; bank < 3; bank++) for (let channel = 0; channel < 2; channel++) {
+      sources.push({ id: path(0x13b9, bank, channel), name: `ABC ${'ABC'[bank]} ${channel ? 'R' : 'L'}`, group: 'ABC speakers' });
+    }
     const sourceMap = new Map(sources.map(source => [source.id, source]));
     const groups = [
       { id: 'line', property: 0x93ac, names: 0x8028, name: 'Line outputs', fallback: i => `Line Out ${i + 1}` },
@@ -56,6 +60,7 @@ globalThis.CueMixModel = (() => {
       { id: 'optical', property: 0x93ae, names: 0x802a, name: 'Optical outputs', fallback: i => `Optical Out ${i >> 8 ? 'B' : 'A'} ${(i & 255) + 1}` },
       { id: 'host', property: 0x93b0, names: 0x802b, nameIndex: i => (Math.floor(i / 8) << 8) | (i % 8), name: 'Computer recording', fallback: i => `Host In ${i + 1}` },
       { id: 'mixer', property: 0x93ad, names: 0x8029, name: 'Mixer inputs', fallback: i => `Mixer In ${i + 1}` },
+      ...(monitorAvailable ? [{ id: 'monitor', property: 0x93b9, names: 0, name: 'ABC monitor input', fallback: i => `ABC Monitor ${i ? 'R' : 'L'}` }] : []),
       { id: 'network', property: 0x93af, names: 0x802c, nameIndex: i => (i >> 8) * 8 + (i & 255), name: 'Network outputs', fallback: i => `Network Out ${(i >> 8) + 1} · ${(i & 255) + 1}` },
     ];
     const destinations = groups.flatMap(group => indices(group.property).filter(i => get(group.property, i)?.length === 8).map(i => ({ id: `${group.id}:${i}`, group: group.id, groupName: group.name, property: group.property, index: i, name: label(get(group.names, group.nameIndex ? group.nameIndex(i) : i), group.fallback(i)), source: get(group.property, i) })));
@@ -87,10 +92,11 @@ globalThis.CueMixModel = (() => {
       if (stereo) pos++;
     }
     addBus('reverb', 'Reverb 1–2', indices(0x0434).filter(i => i < 2), 0x0434, 0x0435, 0x043c, 0x842e, 0x843f, 4);
-    return { records, get, indices, sources, sourceMap, sourceName, destinations, groups: groups.filter(g => destinations.some(d => d.group === g.id)), channels, buses };
+    return { records, get, indices, sources, sourceMap, sourceName, destinations, groups: groups.filter(g => destinations.some(d => d.group === g.id)), channels, buses, monitorAvailable };
   }
   function address(operation, target, index) {
-    if (operation === 'route') return key({line:0x93ac,mixer:0x93ad,optical:0x93ae,network:0x93af,host:0x93b0,phones:0x93b1}[target], index);
+    if (operation.startsWith('monitor-')) return key({'monitor-select':0x13b6,'monitor-level':0x1393,'monitor-members':0x1394,'monitor-mute':0x139b,'monitor-mono':0x139a,'monitor-talk':0x13a3}[operation], index);
+    if (operation === 'route') return key({line:0x93ac,mixer:0x93ad,optical:0x93ae,network:0x93af,host:0x93b0,phones:0x93b1,monitor:0x93b9}[target], index);
     if (operation === 'mute' || operation === 'solo') return key(operation === 'mute' ? 0x03fb : 0x03fa, index);
     const aux = target.startsWith('aux-');
     const bus = aux ? Number(target.slice(4)) : 0;
@@ -98,6 +104,8 @@ globalThis.CueMixModel = (() => {
     return key(operation === 'master' ? (aux ? 0x0403 : target === 'main' ? 0x0420 : 0x0434) : operation === 'master-mute' ? (aux ? 0x0404 : target === 'main' ? 0x0421 : 0x0435) : (aux ? 0x0411 : 0x043c), index);
   }
   function encoded(operation, value) {
+    if (operation === 'monitor-level') return hex(value === '-inf' ? 100 : -Number(value), 2);
+    if (operation === 'monitor-members') return hex(Number(value), 4);
     if (['level', 'master'].includes(operation)) return encodeLevel(value);
     if (operation === 'pan') return hex(Math.trunc((Number(value) + 1) * 0.5 * Q24));
     if (operation === 'route') return value;

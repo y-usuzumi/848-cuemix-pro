@@ -296,6 +296,11 @@
       </div>
     </section>
     <section id="panel-outputs" class="outputs tab-panel" role="tabpanel" aria-labelledby="tab-outputs" tabindex="0" hidden>
+      <div class="monitor-panel console-panel" role="region" aria-labelledby="monitorTitle">
+        <div class="row"><h2 id="monitorTitle" style="flex:1">Monitoring</h2><button class="secondary console-refresh">Refresh monitoring</button></div>
+        <p class="console-status" role="status" aria-live="polite">Reading monitoring settings…</p>
+        <div id="monitorControls"><p class="empty">Loading monitoring settings…</p></div>
+      </div>
       <div class="row">
         <h2 style="flex: 1">Line Output Gains</h2>
         <button id="loadOutputs" class="secondary">Refresh All</button>
@@ -792,12 +797,16 @@
       }
     }
     async function loadOutputs({ quiet = false } = {}) {
+      if (globalThis.consoleUi?.busy()) return;
       if (outputRefreshInFlight || outputWritePending || headphoneWritePending || lineInputRefreshInFlight || lineInputPhaseWritePending) return;
       outputRefreshInFlight = true;
+      const monitorRevision = globalThis.consoleUi?.outputRevision();
+      const outputHost = $('host').value;
       if (!quiet && !outputCount) $('outputOut').innerHTML = '<div class="empty">Loading...</div>';
       if (!quiet && !headphoneCount) $('phoneOut').innerHTML = '<div class="empty">Loading...</div>';
       try {
         const json = await fetchJson('/api/outputs?' + qs({ host: $('host').value }));
+        globalThis.consoleUi?.outputs(json.console, outputHost, monitorRevision, json.monitor);
         try {
           const labelResponse = await fetchJson('/api/get?' + qs({ host: $('host').value, path: lineOutputPath }));
           lineOutputLabelData = JSON.parse(labelResponse.body);
@@ -837,6 +846,7 @@
           $('phoneOut').innerHTML = '<div class="empty">No headphone outputs advertised by this device.</div>';
         }
       } catch (err) {
+        globalThis.consoleUi?.outputsError(err, outputHost, monitorRevision);
         if (!quiet || !outputCount) {
           $('outputOut').innerHTML = `<div class="empty">${escapeHtml(err.message)}</div>`;
         }
@@ -916,6 +926,7 @@
       return `${lineOutputPath}/ch/${lineOutputChannel(index, output)}/${field}`;
     }
     async function writeLineOutputTrim(index, trimDb, status) {
+      if (globalThis.consoleUi?.busy()) { setStripStatus(status, 'Wait for monitoring to finish saving', 'pending'); return; }
       if (outputWritePending || headphoneWritePending || lineInputRefreshInFlight || lineInputPhaseWritePending) return;
       outputWritePending = true;
       setStripStatus(status, 'Saving...', 'pending');
@@ -987,6 +998,7 @@
       $(`phone-${index}-gain-value`).textContent = headphonePairLabel(left, right);
     }
     async function writeHeadphoneTrim(index, trimDb, status) {
+      if (globalThis.consoleUi?.busy()) { setStripStatus(status, 'Wait for monitoring to finish saving', 'pending'); return; }
       if (headphoneWritePending || outputWritePending || lineInputRefreshInFlight || lineInputPhaseWritePending) return;
       headphoneWritePending = true;
       setStripStatus(status, 'Saving...', 'pending');
@@ -1291,6 +1303,7 @@
       setStripStatus($('meterMappingStatus'), `${changes.length} changed samples`, changes.length ? 'saved' : '');
     }
     function renderMeterSnapshot(meters) {
+      globalThis.consoleUi?.monitorState(meters.monitor, !meters.error && meters.age_ms !== null && meters.age_ms < 2000);
       if (!Array.isArray(meters.records) || !meters.records.length) return;
       renderPairMeter('main-host', meters.faders.main_host_11_12);
       renderPairMeter('headphone-host', meters.faders.headphone_host_11_12);
@@ -1463,6 +1476,7 @@
     loadMeters();
   </script>
   <script>__CONSOLE_MODEL__</script>
+  <script>__MONITOR_JS__</script>
   <script>__CONSOLE_JS__</script>
 </body>
 </html>

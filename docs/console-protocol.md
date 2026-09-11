@@ -26,12 +26,13 @@ target, controller, sequence, protocol, successful AECP status and valid length.
 `POST /api/console/changes` requires the existing same-origin session token,
 allowed host, and form field `changes`. An edit is
 `operation:target:index:previousHex:value`; semicolons separate up to 32 edits.
-The fresh snapshot must match every previous value before any setter is sent.
+Freshly synchronized state must match every previous value before any setter is sent.
 No-op writes are removed. Unknown controls, missing inventory members, duplicate
 controls, malformed values and stale prior values fail before the first write.
 The server reports acknowledged count on partial failure and never retries.
-The browser follows every attempted batch with a fresh snapshot and reconciles
-applied routes, leaving unsuccessful drafts for review.
+The browser follows routing/mixing batches with a fresh snapshot and reconciles
+applied routes, leaving unsuccessful drafts for review. Monitor-only batches
+instead use the persistent session and return verified readback, as below.
 
 ## State refresh and meter continuity
 
@@ -42,19 +43,58 @@ chain. The next state request acknowledges the preceding **state** sequence,
 not the intervening meter sequence; all requests share a wrapping sequence
 counter. Both complete inventories contained the same 9,307 record keys.
 
-The read-only worker now serves console, line-input and output refreshes over
-that connection, polling meters between state pages when 20 milliseconds have
-elapsed. Reads retain the 256-page bound and also have one total deadline
-covering queue time and page collection. A failed read reconnects the proxy
-without closing the SSE feed. Explicit vendor writes still use their existing
-fresh-session lifecycle and can briefly interrupt metering.
+The worker serves console, line-input and output refreshes over that connection.
+It continues the incremental re-arm chain between meter requests and also
+starts an independent full inventory read after 500 ms since the last completed
+inventory. Explicit HTTP refreshes and monitor pre-write/readback checks always
+read the inventory afresh. Full reads interleave meters after 20 ms of page
+collection, retain bounds, and commit only a complete inventory. Events newer
+than a property's inventory page are overlaid before that commit.
+The two-byte acknowledgement is the last **state response**
+sequence, including terminal empty responses; it is never a meter or setter
+sequence. Matching events against the outstanding state sequence are applied
+even when they arrive between meter pages or during a write acknowledgement.
+Reads retain the 256-page bound and one total deadline covering queue time and
+page collection. A failed read reconnects and reloads the full inventory
+without closing the SSE feed. Routing/mixing and older vendor writes retain
+their fresh-session lifecycle; monitor-only writes reuse the live connection.
 
-Live verification of the release server completed 20 inventory GETs in 42.1
+The earlier 2026-09-10 release verification completed 20 inventory GETs in 42.1
 seconds while a single SSE connection delivered 702 meter updates. All reads
 succeeded, with no SSE closure, revision reset or reported device error; the
 largest observed gap was 62.2 ms (99th percentile 60.3 ms). `/api/get` also
 returned device status 200. This verifies read continuity, not setter behavior
 or every network failure condition.
+
+On 2026-09-11, twenty read-only incremental re-arms after the initial inventory
+returned empty responses in 0.21–0.86 ms. Release verification then delivered
+345 SSE events, each containing all four monitor properties, over 20.7 seconds
+while completing twenty inventory GETs. There were no reported errors or
+monitor revision regressions; maximum event gap was 61.4 ms (p99 60.7 ms).
+`/api/get` returned device status 200. This measures idle delivery and read
+continuity, not end-to-end latency from moving the physical knob or a live
+setter. Synthetic TCP tests cover interleaved monitor events, stale events,
+same-session writes/readback, conflicts, rejection, deadlines and no retries;
+browser tests cover queued drags, newer external state and device switches.
+
+Subsequent live comparison exposed a missing-event case: both browser pages and
+the worker's successful `/api/outputs` response remained at `1393:0=1f` (-31 dB),
+while a separate 9,307-record device read returned `2d` (-45 dB), matching CueMix
+Pro's visible monitor level. Empty incremental replies therefore do **not**
+establish that cached state is current. The earlier idle cadence test did not
+verify this. Independent inventory reconciliation now recovers even if every
+incremental event is missed. TCP regressions deliberately return empty deltas
+after an unannounced hardware change, require background recovery, reject a
+write using the stale value, and verify post-write state without an event.
+The cause of missing incremental events/controller scope remains unresolved.
+
+After restoring independent reads, both existing browser pages changed from
+-31 to -45 dB without a page reload. A separate device inventory and the server
+both returned `2d`, agreeing with CueMix Pro. The release check completed 20
+inventory GETs and `/api/get` status 200 while delivering 392 monitor/meter
+events in 23.5 seconds, with no reported errors and a 66.6 ms maximum meter gap
+(p99 60.8 ms). Most inventory GETs took 76–142 ms; the first took 1.14 seconds.
+These are read-only checks; write verification remains synthetic.
 
 ## Routing
 
@@ -70,6 +110,7 @@ line, DSP, digital, network, host and headphone destinations.
 | Network output | `93af` | `(stream << 8) | channel`, 8 channels/stream |
 | Computer recording | `93b0` | linear channel |
 | Headphones | `93b1` | `(phone << 8) | L/R channel` |
+| ABC monitor shared input | `93b9` | 0 = left, 1 = right |
 
 The four-byte source value is `u16 bankProperty, u8 bank, u8 channel`:
 
@@ -84,6 +125,7 @@ The four-byte source value is `u16 bankProperty, u8 bank, u8 channel`:
 | Main / Mix Monitor | `13ad` | bank 1 / 2, channel 0–1 |
 | Aux | `13ad` | bank 3, channel 0–25 |
 | Reverb | `13ad` | bank 4, channel 0–1 |
+| ABC speaker signals | `13b9` | bank 0/1/2 = A/B/C, channel 0/1 = L/R |
 | Disconnected | `0000` | bank 0, channel 0 |
 
 All selections require corresponding advertised records. Optical/host name
@@ -137,11 +179,170 @@ superseded: the current router records place Line In 5–6 in mixer slots 16–1
 Fader addressing is by mixer slot. Meter records can represent distinct signal
 stages, so this does not resolve every meter-stage mapping.
 
+## ABC monitoring
+
+The native Outputs tab and [MOTU's 848 guide](https://cdn-data.motu.com/manuals/pro-audio-v2/848_User_Guide.pdf)
+(printed pages 31–33, 42) distinguish one Monitor Group from ABC speaker
+selection. ABC uses one shared stereo input and three stereo output signals,
+which can be routed to physical outputs; the main monitor knob controls their
+shared level. Monitor Group membership applies when ABC is off. The browser
+keeps these controls separate and stages all connection changes for review.
+
+Earlier standard AEM reads identify Audio Clusters 23/24 as ABC Monitor L/R,
+but the only standard Control is IDENTIFY. These labels are corroboration,
+not a standard AEM setter. The implementation uses the captured vendor session.
+
+| Setting | Property, index | Evidence / value |
+| --- | --- | --- |
+| ABC selection | `13b6`, 0 | Three-bit mask 0–7; captured Off/A/B/C/All = 0/1/2/4/7, pair combinations = 3/5/6 |
+| Monitor Group members | `1394`, 0 | Captured big-endian u16 mask, bit n = Line Out n+1 |
+| Shared monitor attenuation | `1393`, 0 | `kMonitorTrim`, same `OutputTrimConverter` as line/phones: 0–99 dB attenuation, 100 = silence |
+| Monitor mute | `139b`, 0 | Captured front-panel 0/1 transitions; installed-client `kMuteEnable` setter and boolean serializer |
+| Monitor mono | `139a`, 0 | Installed-client `kMonoEnable` setter and boolean serializer; 0 = stereo, 1 = mono |
+| Talkback enable | `13a3`, 0 | Installed-client `kTalkbackEnable` setter and boolean serializer; 0 = off, 1 = on |
+| Shared stereo source routes | `93b9`, 0/1 | `kProMonitorBankPatch`, four-byte source path |
+
+Installed-client `PendingChange<kABCMonitorEnable>` at `0x1404eeae0` embeds
+`13b6`; `kMonitorGroup` at `0x1404ef660` embeds `1394`; `kMonitorTrim` at
+`0x1404efc30` embeds `1393`. The monitor trim IO type at RTTI file offset
+`0xf95660` names the same output-trim converter as line/headphone trims.
+The read-only 2026-09-10 snapshot reports `1393:0=1e`, matching the native
+Outputs knob's −30 dB, `1394:0=0003`, and ABC off (`13b6:0=00`).
+
+`PendingChange<kProMonitorBankPatch>` at `0x14061a5c0` embeds `13b9`.
+Its serializer at `0x1405efb10` writes composite-index property `93b9`,
+size 4, and the same big-endian source path used by existing routes. The
+source-stream encoder at `0x140641a18` combines `13b9` with bank/channel;
+the native Device source inventory enumerates ABC A/B/C, each L/R, while
+the snapshot advertises only two shared destination records `93b9:0/1`.
+Read-only meter inventory independently supplies `13b9` banks 0, 1 and 2,
+each with exactly two channels (all silent while ABC is off/disconnected).
+Both were disconnected (`00000000`); inspecting and implementing this
+feature did not alter those routes or any other hardware settings.
+
+The `02` in captured `13:94:00:00:02:<mask>` is the u8 value length, not an
+additional group selector. Only one membership mask is exposed. Membership
+writes require known line-output indices below 12 and reject unmapped bits
+in both current and requested masks. All ABC controls and source choices
+require the valid selection byte and exactly two advertised stereo input
+records. The browser offers pair shortcuts A+B=3, A+C=5, and B+C=6 as one
+selection write each. A+B=3 was observed in a front-panel state event; the user
+also confirms simultaneous front-panel selection. Masks 5/6 are derived from
+the independent bit assignments, not captured native-client setters. The new
+pair writes are tested synthetically; live hardware verification remains
+read-only. Values outside 0–7 are rejected.
+ABC sources cannot be connected to the mixer or their own input through this
+API. Mute uses the device's own context-dependent latch, documented below.
+
+`monitor-select:monitor:0:<oldByte>:<mask>`,
+`monitor-level:monitor:0:<oldByte>:<dB or -inf>`, and
+`monitor-members:monitor:0:<oldU16>:<decimalMask>` use the existing console
+batch API, including whole-batch conflict checks and acknowledgement handling.
+When every edit is a monitor control, the worker reads a fresh inventory,
+checks the entire batch against that state, sends sequential `...:03` setters,
+then reads a fresh inventory again. The response includes
+`{acknowledged,monitor:{records,revision}}`; monitor records also accompany each
+meter SSE event. Revisions increase across worker reconnects and use a wall-clock
+millisecond floor to survive normal server restarts without reloading the page.
+No setter is
+retried on timeout, conflict, rejection or readback failure. Other batches keep
+their existing full-snapshot lifecycle.
+
+The browser sends level changes during dragging with a 60 ms coalescing window,
+one in-flight request, and one latest pending value per control. Pending edits
+retain their original conflict bytes; an acknowledged, verified own write
+supplies the expectation for the next queued value. Newer device revisions
+take precedence over late responses, while pending values remain visible until
+confirmed or rejected. State events update the existing controls without
+replacing focused DOM nodes. Host changes cancel queued edits.
+
+`route:monitor:<0 or 1>:<oldPath>:<newPath>` addresses the shared input.
+`/api/outputs` includes a console snapshot from its existing state read, so
+the panel adds no periodic vendor inventory request. It also includes the
+monitor records and revision captured with that state read, allowing the
+five-second poll to recover monitor state if browser SSE delivery pauses.
+
+## Front-panel Mute and Talk
+
+Static inspection on 2026-09-11 extends the earlier passive mute-state mapping.
+`PendingChange<kMuteEnable>` has RTTI at file offset `0x10f1370` and vtable
+`0x140c03430`. Its constructor's containing function embeds `139b` at
+`0x140615d40` / `0x140615db0`; the pending-change construction at
+`0x140615f59` references that vtable. Serializer `0x1405edbf0` emits
+`13:9b:<u16 index>:01:<boolean>` for the non-composite form. This provides
+setter evidence beyond observing a state transition; it does not prove that
+the attached firmware accepts a browser-originated setter.
+
+`PendingChange<kTalkbackEnable>` has RTTI at `0x107ab70` and vtable
+`0x140be8270`. Setter `0x1404f4700` embeds `13a3`, constructs that pending
+change at `0x1404f4ad9`, and serializer `0x1405ee0f0` emits
+`13:a3:<u16 index>:01:<boolean>`. The separately named Latch setter uses
+`13a2`; browser Talk toggles the enable latch without changing that preference.
+Static neighboring mappings identify Talkback Level/Dim/Source at
+`13a4`/`13a5`/`13a6`. Those setup controls are not exposed by this change.
+
+A fresh 9,307-record device inventory reports `139b:0=00`, `13a3:0=00`,
+`13a2:0=01`, `13a4:0=00000000`, `13a5:0=01000000`, `13a6:0=40`.
+The native Home tab independently shows Talk off, Latch checked, Source None,
+Level −∞ and Dim 0 dB. The [848 guide](https://cdn-data.motu.com/manuals/pro-audio-v2/848_User_Guide.pdf),
+printed pages 9, 32 and 34, documents Mute targeting the current monitor context
+and Talk using the configured talkback microphone and destinations.
+
+`monitor-mute:monitor:0:<oldByte>:<0 or 1>` and
+`monitor-talk:monitor:0:<oldByte>:<0 or 1>` use the existing persistent monitor
+write path, fresh conflict checks, validated acknowledgements, and independent
+full-inventory readback. Both require advertised one-byte 0/1 records and the
+mapped monitoring inventory. They do not write output trims, speaker masks,
+microphone configuration, routing, or talkback Latch. The browser provides
+explicit click-on/click-off buttons; Talk remains enabled until switched off.
+Both latches travel with the meter stream and Outputs recovery snapshots.
+
+Synthetic tests cover exact property bytes, missing/malformed inventory,
+whole-batch conflicts, no-op suppression, rapid toggles, failed writes, device
+readback, and external state changes. Live checks remain read-only: neither
+new setter has been automatically exercised on the 848. The live `/api/get`
+check returned 200; submitting both already-off values through the authorized
+API returned `acknowledged:0` with fresh off-state readback, confirming no
+setters were sent. Both open browser pages were reloaded after the server
+restart and display enabled Mute/Talk buttons matching the device. Verify both
+directions and the audible targets during a user-controlled listening session.
+
+### Mono
+
+The installed client's `PendingChange<kMonoEnable>` RTTI is at file offset
+`0x10f1140`, with vtable `0x140c04e18`. Setter `0x1406155c0` embeds `139a`
+at `0x140615780` / `0x1406157f0` and constructs the named pending change
+at `0x140615999`. Serializer `0x1405edab0` emits
+`13:9a:<u16 index>:01:<boolean>`. This is separate from headphone source mono.
+The fresh 2026-09-11 inventory advertises exactly `139a:0=00`.
+
+`monitor-mono:monitor:0:<oldByte>:<0 or 1>` uses the same validated monitor
+write path as Mute and Talk, including advertised boolean checks, whole-batch
+conflict checks, acknowledgement validation and full-inventory readback. Mono
+state joins both the meter stream and Outputs recovery snapshots. No routes,
+levels or other latches are written when Mono changes.
+
+MOTU's guide (printed page 32, linked above) states that Mono sums left/right
+to both channels of the main output pair, or the ABC pairs when enabled.
+Other Monitor Group channels are unaffected. The device applies its own
+3 dB attenuation to the summed signal; the browser does not emulate the DSP.
+The browser button shows On/Off and restores stereo on the next click.
+Synthetic tests cover both values, invalid inventory, conflicts, failed writes,
+readback and external changes. Live hardware verification remains read-only
+or no-op; the audible Mono behavior still needs user-controlled validation.
+The live `/api/get` check returned 200. Submitting the already-off Mono value
+returned `acknowledged:0` and `139a:0=00`, sending no setter. Both refreshed
+browser pages display Mono off. Simulator browser checks verified on/off and
+external-state updates without changing the other front-panel controls.
+Revision checks discard
+output reads that overlap a write or device change. Browser testing used a
+synthetic device for routing apply/readback, selection, membership and volume.
+
 ## Remaining validation
 
 The installed-client and read-only evidence justifies the implemented property
 mapping; it does not prove every firmware setter or stereo propagation behavior.
 A controlled listening session should validate new writes and concurrent
 external-controller changes. Polling remains the recovery mechanism. No
-standard notification registration, preset commands, A/B/C routing, DSP-effect
+standard notification registration, preset commands, DSP-effect
 controls, AVB stream connection management, or link editing is added here.
