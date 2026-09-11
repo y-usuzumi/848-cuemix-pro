@@ -1,6 +1,44 @@
 use super::*;
 
 #[test]
+fn console_write_route_enforces_authorization_and_batch_parsing_before_network_io() {
+    let scope = ServerScope::Configured("192.0.2.1".into());
+    let hub = MeterHub::default();
+    for (origin, body, status) in [
+        (
+            Some("https://example.test"),
+            "token=secret&changes=mute:input:0:00:1",
+            403,
+        ),
+        (None, "token=secret&changes=mute:input:0:00:1", 403),
+        (Some("http://127.0.0.1:8480"), "token=wrong", 403),
+        (
+            Some("http://127.0.0.1:8480"),
+            "token=secret&changes=bad",
+            400,
+        ),
+        (
+            Some("http://127.0.0.1:8480"),
+            "token=secret&host=192.0.2.2&changes=mute:input:0:00:1",
+            400,
+        ),
+    ] {
+        let response = route_browser_request(
+            "POST",
+            "/api/console/changes",
+            body,
+            origin,
+            &scope,
+            "http://127.0.0.1:8480",
+            "secret",
+            &hub,
+            Duration::from_millis(1),
+        );
+        assert_eq!(response.status, status);
+    }
+}
+
+#[test]
 fn authorizes_only_the_local_page_with_its_session_token() {
     let token = "0123456789abcdef";
     assert!(is_authorized(
@@ -217,4 +255,29 @@ fn formats_the_combined_physical_output_inventory() {
     assert!(json.contains("\"channel_index\":3,\"attenuation\":42,\"trim_db\":-42"));
     assert!(json.contains("\"headphone_outputs\":["));
     assert!(json.contains("\"trim_db\":[null,null]"));
+}
+
+#[test]
+fn timed_out_stop_keeps_the_worker_registered_until_it_actually_closes() {
+    let hub = MeterHub::default();
+    let (stop_sender, stop_receiver) = mpsc::channel();
+    let (state_sender, _state_receiver) = mpsc::channel();
+    let meters = Arc::new(MixerMeterFeed::default());
+    hub.workers.lock().unwrap().insert(
+        "device".into(),
+        MeterWorker {
+            stop_sender,
+            state_sender,
+            pending_stop: None,
+            meters: Arc::clone(&meters),
+        },
+    );
+    assert!(hub.stop("device", Duration::ZERO).is_err());
+    assert!(hub.workers.lock().unwrap().contains_key("device"));
+    assert!(
+        hub.start("device", 1, Duration::ZERO).is_err(),
+        "do not start a second session while the first is closing"
+    );
+    stop_receiver.recv().unwrap().send(()).unwrap();
+    assert!(hub.existing_feed("device").unwrap().is_none());
 }

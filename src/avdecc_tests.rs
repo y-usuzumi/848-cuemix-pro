@@ -421,3 +421,140 @@ fn meter_feed_notifies_each_snapshot_and_closure() {
         .expect("feed closure");
     assert!(closed.closed);
 }
+
+// A local protocol peer exercises the actual TCP session and worker channels.
+// State pages are delayed enough to require an intervening meter request.
+fn simulated_meter_peer() -> (String, thread::JoinHandle<Vec<u8>>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let peer = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        stream.set_nodelay(true).unwrap();
+        let mut header = Vec::new();
+        while !header.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            header.push(byte[0]);
+        }
+        stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+        let mut trace = Vec::new();
+        let mut prior_sequence = 0u16;
+        let mut state_sequence = 0u16;
+        let mut generation = 0u8;
+        loop {
+            let mut header = [0; 12];
+            if let Err(error) = stream.read_exact(&mut header) {
+                assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+                return trace;
+            }
+            let mut payload = vec![0; u16::from_be_bytes([header[2], header[3]]) as usize];
+            stream.read_exact(&mut payload).unwrap();
+            let mut frame = decode_app_frame(&header, payload).unwrap();
+            if frame.message_type == APP_ENTITY_ID_REQUEST {
+                frame.message_type = APP_ENTITY_ID_RESPONSE;
+                frame.payload = 42u64.to_be_bytes().to_vec();
+                stream.write_all(&frame.encode().unwrap()).unwrap();
+                continue;
+            }
+            assert_eq!(frame.message_type, APP_AVDECC_FROM_APC);
+            let sequence = u16::from_be_bytes([frame.payload[20], frame.payload[21]]);
+            assert_eq!(sequence, prior_sequence.wrapping_add(1));
+            prior_sequence = sequence;
+            let protocol = frame.payload[27];
+            assert!(matches!(protocol, 1 | 4), "read-only worker sent a setter");
+            let data = if protocol == 1 {
+                if frame.payload.len() == 28 {
+                    generation += 1;
+                    state_sequence = sequence;
+                    trace.push(1);
+                    thread::sleep(Duration::from_millis(25));
+                    vec![0x03, 0xfb, 0, 0, 1, generation]
+                } else {
+                    assert_eq!(
+                        &frame.payload[28..],
+                        &state_sequence.to_be_bytes(),
+                        "ACK must refer to the state page, not the intervening meter sequence"
+                    );
+                    trace.push(2);
+                    Vec::new()
+                }
+            } else {
+                trace.push(4);
+                vec![0, 0, 0x13, 0xad, 0, 2, 0x6a, 0x6f]
+            };
+            frame.message_type = APP_AVDECC_FROM_APS;
+            frame.payload.truncate(28);
+            frame.payload[1] = 7;
+            frame.payload[2..4].copy_from_slice(&(16u16 + data.len() as u16).to_be_bytes());
+            frame.payload.extend(data);
+            stream.write_all(&frame.encode().unwrap()).unwrap();
+            if protocol == 4 {
+                stream.write_all(&frame.encode().unwrap()).unwrap();
+            }
+        }
+    });
+    (address, peer)
+}
+
+#[test]
+fn repeated_fresh_reads_share_the_meter_session_and_preserve_state_ack_sequences() {
+    let (address, peer) = simulated_meter_peer();
+    let timeout = Duration::from_secs(2);
+    let worker = start_mixer_meter_worker(address, 0x0001_f2ff_fefe_b9e2, timeout);
+    let mut revision = worker
+        .meters
+        .wait_after(0, timeout)
+        .unwrap()
+        .unwrap()
+        .revision;
+    for generation in [2, 3] {
+        let (reply, receiver) = mpsc::channel();
+        worker
+            .state_sender
+            .send(VendorSnapshotRequest {
+                deadline: Instant::now() + timeout,
+                reply,
+            })
+            .unwrap();
+        let state = receiver.recv_timeout(timeout).unwrap().unwrap();
+        assert_eq!(
+            state.0[0].value,
+            vec![generation],
+            "each request must read fresh device state"
+        );
+        let update = worker.meters.snapshot().unwrap();
+        assert!(!update.closed);
+        assert!(
+            update.revision > revision,
+            "meters must progress during a state read"
+        );
+        revision = update.revision;
+    }
+    // Requests that expire in the queue must not initiate another inventory.
+    let (reply, receiver) = mpsc::channel();
+    worker
+        .state_sender
+        .send(VendorSnapshotRequest {
+            deadline: Instant::now() - timeout,
+            reply,
+        })
+        .unwrap();
+    assert!(receiver.recv_timeout(timeout).unwrap().is_err());
+    assert!(!worker.meters.snapshot().unwrap().closed);
+    let (reply, stopped) = mpsc::channel();
+    worker.stop_sender.send(reply).unwrap();
+    stopped.recv_timeout(timeout).unwrap();
+    assert!(worker.meters.snapshot().unwrap().closed);
+    let trace = peer.join().unwrap();
+    assert_eq!(trace.iter().filter(|&&kind| kind == 1).count(), 3);
+    assert_eq!(
+        trace
+            .windows(3)
+            .filter(|window| *window == [1, 4, 2])
+            .count(),
+        2
+    );
+}

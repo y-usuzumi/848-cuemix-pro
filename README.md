@@ -269,14 +269,16 @@ This is a browser-origin safeguard, not authentication against hostile local
 processes. Anyone with local access to the machine may also be able to reach
 the device's HTTP control service directly.
 
-The UI is divided into **Inputs**, **Outputs**, **Mixer**, and **Diagnostics**
+The UI is divided into **Inputs**, **Outputs**, **Patchbay**, **Routing**,
+**Mixing**, **Aux Mixing**, and **Diagnostics**
 tabs. Inputs contains live Mic 1-4 controls for preamp name, gain, 48 V, pad,
 and polarity, plus gain and polarity controls for Line Inputs 5-12. Outputs
 contains line-output gain controls plus the headphone outputs advertised by
 the connected device. Inputs and Outputs show live per-channel signal meters;
-Phones meters retain separate L/R lanes. Mixer contains the capture-validated
-faders and full read-only meter diagnostics, while Diagnostics keeps the raw
-read, write, and probe controls for the remaining datastore surface. The
+Phones meters retain separate L/R lanes. Patchbay and Routing edit the same
+connections through a searchable list or matrix. Mixing controls each bus;
+Aux Mixing shows one input's sends across buses. Diagnostics keeps the original
+capture-validated fader shortcuts, meter diagnostics, and raw datastore tools. The
 selected tab is retained in the URL fragment.
 
 Input and line-output strip headings are not fixed display strings. The UI
@@ -370,27 +372,62 @@ mapped. Line and headphone reads share the same bounded snapshot. The exact
 and attenuation conversion are derived from the installed CueMix model and
 generation-compatible output-trim traffic.
 
-### Mixer faders
+### Patchbay, routing, mixing, and aux sends
 
-The **Validated Mixer Faders** section is an opt-in AVDECC vendor-control path,
-not a compatibility-datastore write. Close CueMix Pro before using it: concurrent
-controller behavior is not mapped. Each click opens the capture-validated proxy
-session, drains the bounded initial vendor-state exchange, sends one fader
-command, and requires its matching acknowledgement. The browser never sends a
-fader command automatically. It serializes fader clicks and briefly waits after
-an acknowledgement before allowing the next session. If the 848 rejects a
-session anyway, the server retries once using a fresh session and the same
-idempotent requested fader value.
+**Patchbay** lists the current source for each destination. Choose a destination
+group, search for a source, and stage one channel or a consecutive range of up
+to 32 channels. “Same source” duplicates a mono source across the selected
+destinations. **Routing** offers the same edits as a paged source/destination
+matrix. Both views share a review tray; only **Apply connections** writes to
+the device. Discarding a draft changes nothing on the hardware.
 
-Only these capture-validated controls are available: `Main 1-2 / Host 11-12`,
-`Headphone Mix / Host 11-12`, and `Main 1-2 / Line In 5-6`, at `-12 dB` or
-`-60 dB`. The captured encoding is `00:40:4d:e6` for `-12 dB` and
-`00:00:41:89` for `-60 dB`; do not infer intermediate values, other strips, or
-other buses until they are separately captured.
+Destinations include line outputs, headphones, optical outputs, computer
+recording channels, mixer inputs, and network outputs. Sources come from the
+device's advertised inventories: physical inputs, computer playback, optical,
+network, mixer direct outs, Main, Mix Monitor, aux buses, and Reverb.
+Network routing here patches audio channels within the device; it does not
+establish AVB stream connections to other devices.
+
+**Mixing** selects Main, an aux bus, or Reverb and shows its input strips plus
+the bus master. Input stereo links and aux pairing follow the device's current
+configuration. Controls include level, pan, input mute/solo, master level/mute,
+and aux/reverb pre/post-fader selection. Faders save on release; numeric entries
+save on Enter or blur. Levels accept `-inf` or −90 through +12 dB. Input mute
+and solo affect that input across mixes. **Aux Mixing** selects one input and
+shows all its aux/reverb sends together. Pre/post is a bus-wide setting.
+
+The console reads bounded AVDECC vendor-state snapshots and polls every five
+seconds while visible, over the same persistent connection as the meters.
+Background reads leave controls enabled and preserve a focused strip, including
+the original value used to detect a conflicting edit. An edit made during a
+read waits for it to finish, then saves and verifies readback. Transient read
+failures retain the last confirmed values; after 15 seconds without a successful
+read, editing pauses until recovery. Failed write readback pauses editing
+immediately. HTTP preamp polling runs only while Inputs is visible.
+Every edit includes the previously read value. Before the first write, the
+server checks the entire batch against a fresh snapshot, validates inventories
+and ranges, and rejects conflicts. Each write requires a matching successful
+acknowledgement; the UI then reads back and verifies the values. Batches are
+sequential, not atomic: a failure can leave some connections applied, which the
+UI reconciles on refresh. Failed writes are never automatically retried.
+
+The expanded mappings combine existing captures, read-only hardware correlation,
+and converters/property types inspected in installed CueMix Pro 1.1.12. Exact
+new hardware writes have **not** been exercised during automated verification.
+Concurrent controllers can still change state after validation; use one active
+controller when editing. Stereo-link editing, DSP effects, bus alias editing,
+AVB connection management, and hardware A/B/C monitor configuration remain
+outside this implementation. See [console protocol evidence](docs/console-protocol.md).
+
+Run the offline model tests with `node --test tools/console-model.test.cjs`.
+For browser testing without audio hardware, run `node tools/console-fixture.cjs`
+and open `http://127.0.0.1:8482/#patchbay`. That server uses synthetic state,
+never contacts a device, and keeps edits only in memory. Rust runtime and
+production UI still have no external dependencies.
 
 ### Live channel meters
 
-The Inputs, Outputs, and Mixer tabs share one local, read-only AVDECC meter
+The Inputs, Outputs, Mixing, Aux Mixing, and Diagnostics tabs share one local, read-only AVDECC meter
 session. It uses the capture-observed protocol `00:01:f2:00:00:04`, receives
 its two meter pages, and exposes both the packed words and decoded channels.
 The browser opens `/api/mixer/meters/events` as a Server-Sent Events stream;
@@ -421,14 +458,20 @@ eleventh is Line In 5-6. The same Mic / Inst word appears at the still-unmapped
 available under **All captured meter channels**. The UI uses a −127 to 0 dBFS
 visual range and retains decoded and raw values in hover text. Meters rise
 vertically beside their channel controls, with adjacent L/R bars for Phones.
+Mixing, Aux Mixing, Inputs, Outputs and diagnostic meters share the same
+green-to-amber-to-red gradient and smooth 80-millisecond level transition.
+The gradient spans the full meter height and is clipped at the current level,
+so low levels show green and red appears only near the top of the scale.
 The low-level region is compressed so the visible marks at −∞, −48, −36, −24,
 −12, −6, −3, and clip remain evenly spaced and readable. A thin peak marker
 jumps to every new louder sample and holds that position for one second after
-the live level falls. A vendor control or
-inventory refresh first closes the local meter session, avoiding concurrent
-vendor sessions; the event stream reconnects after that bounded operation and
-resumes metering. Empty startup snapshots preserve the last displayed values,
-so a bounded restart does not flash every meter to zero. The device request
+the live level falls. Inventory refreshes for the console, line inputs, and
+outputs share the persistent meter session. Fresh state pages and meter polls
+are interleaved, so routine five-second refreshes keep the event stream alive.
+Each refresh has a total deadline and a 256-page limit. Explicit vendor writes
+still close the read-only session first; the event stream reconnects afterward.
+Empty startup snapshots preserve the last displayed values, so a bounded
+restart does not flash every meter to zero. The device request
 loop targets a 5-millisecond interval; actual cadence is bounded by the time
 needed to receive both device pages.
 

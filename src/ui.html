@@ -162,7 +162,7 @@
     .vertical-meter-column { display: grid; grid-template-rows: minmax(0, 1fr) 12px; gap: 2px; min-height: 0; }
     .vertical-meter-label { color: var(--muted); font: 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; text-align: center; }
     .meter-lane { position: relative; display: block; min-height: 0; overflow: hidden; border-radius: 999px; background: var(--line); }
-    .meter-fill { position: absolute; right: 0; bottom: 0; left: 0; display: block; height: 0%; background: var(--accent); transition: height 80ms linear; }
+    .meter-fill { position: absolute; right: 0; bottom: 0; left: 0; display: block; height: 100%; background: linear-gradient(to top, #30976b, #8bbe66 75%, #dfb352 92%, #d75d51); clip-path: inset(100% 0 0); transition: clip-path 80ms linear; }
     .meter-peak { position: absolute; right: 0; bottom: 0%; left: 0; z-index: 1; display: block; height: 2px; background: var(--ink); opacity: 0; pointer-events: none; }
     .meter-scale { position: relative; display: block; min-height: 0; color: var(--muted); font: 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
     .stereo-channel-meter .meter-scale { height: calc(100% - 14px); }
@@ -259,6 +259,7 @@
       .header-controls { margin-top: 12px; align-items: end; }
       .tab { flex: 1 0 auto; padding-inline: 12px; }
     }
+    __CONSOLE_CSS__
   </style>
 </head>
 <body>
@@ -276,7 +277,10 @@
     <nav class="tabs" role="tablist" aria-label="Control views">
       <button id="tab-inputs" class="tab" type="button" role="tab" aria-selected="true" aria-controls="panel-inputs" tabindex="0" data-tab="inputs">Inputs</button>
       <button id="tab-outputs" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-outputs" tabindex="-1" data-tab="outputs">Outputs</button>
-      <button id="tab-mixer" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-mixer" tabindex="-1" data-tab="mixer">Mixer</button>
+      <button id="tab-patchbay" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-patchbay" tabindex="-1" data-tab="patchbay">Patchbay</button>
+      <button id="tab-routing" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-routing" tabindex="-1" data-tab="routing">Routing</button>
+      <button id="tab-mixer" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-mixer" tabindex="-1" data-tab="mixer">Mixing</button>
+      <button id="tab-aux" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-aux" tabindex="-1" data-tab="aux">Aux Mixing</button>
       <button id="tab-diagnostics" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-diagnostics" tabindex="-1" data-tab="diagnostics">Diagnostics</button>
     </nav>
     <section id="panel-inputs" class="preamp tab-panel" role="tabpanel" aria-labelledby="tab-inputs" tabindex="0">
@@ -303,7 +307,9 @@
         <p class="phone-note">Outputs and stereo channel pairs are discovered from the device. Close CueMix Pro before changing gain here.</p>
       </div>
     </section>
-    <section id="panel-mixer" class="mixing tab-panel" role="tabpanel" aria-labelledby="tab-mixer" tabindex="0" hidden>
+    __CONSOLE_PANELS__
+    <section id="panel-diagnostics" class="diagnostics tab-panel" role="tabpanel" aria-labelledby="tab-diagnostics" tabindex="0" hidden>
+<details id="legacyMixer"><summary>Legacy fader diagnostics and meter tools</summary>
       <div class="row">
         <h2 style="flex: 1">Validated Mixer Faders</h2>
         <span class="muted">Close CueMix Pro before changing a fader here. Writes are one at a time.</span>
@@ -340,8 +346,7 @@
       <details class="meter-feed" id="allMeters"><summary>All captured meter channels (source-labelled where mapped)</summary><div class="meter-groups" id="meterGroups"></div></details>
       <div class="meter-mapping-tools"><button id="captureMeterBaseline" class="secondary">Capture meter baseline</button><button id="compareMeterBaseline" class="secondary" disabled>Compare to baseline</button><span class="strip-status" id="meterMappingStatus" aria-live="polite">Read-only mapping helper</span></div>
       <pre class="meter-mapping-result" id="meterMappingResult">Capture a baseline, introduce one known source or change one fader, then compare. No hardware write is sent by this helper.</pre>
-    </section>
-    <section id="panel-diagnostics" class="diagnostics tab-panel" role="tabpanel" aria-labelledby="tab-diagnostics" tabindex="0" hidden>
+</details>
       <h2>Datastore</h2>
       <div class="toolbar">
         <label>Path<input id="path" value="/datastore/ext/ibank/0" spellcheck="false"></label>
@@ -428,6 +433,7 @@
       if (activeTab.dataset.tab === 'mixer') {
         loadMeterLabels();
       }
+      globalThis.consoleUi?.activate(activeTab.dataset.tab);
       loadMeters();
       if (activeTab.dataset.tab === 'inputs') loadLineInputs({ quiet: lineInputCount > 0 });
       if (activeTab.dataset.tab === 'outputs') loadOutputs({ quiet: outputCount > 0 || headphoneCount > 0 });
@@ -1118,7 +1124,7 @@
       const fill = $(id);
       if (!fill) return;
       const percent = meterPercent(value);
-      fill.style.height = `${percent}%`;
+      fill.style.clipPath = `inset(${100 - percent}% 0 0)`;
       fill.title = meterText(value);
       renderMeterPeak(id, value, percent);
     }
@@ -1186,7 +1192,7 @@
         const title = record.property_id === '13ad' && record.index === 0 ? 'Mix In · 32 stereo pairs (64 channels)' : `0x${record.property_id} · bank ${record.index}`;
         const channels = record.values.map((value, slot) => {
           const name = meterChannelName(record, slot);
-          return `<div class="meter-channel" title="${escapeHtml(name)} · ${meterWordText(value)}"><span class="meter-channel-name">${escapeHtml(name)} · ${meterWordLabel(value)}</span><span class="meter-lane"><span class="meter-fill" style="height:${meterPercent(louderMeterChannel(value))}%"></span></span>${meterScaleMarkup()}</div>`;
+          return `<div class="meter-channel" title="${escapeHtml(name)} · ${meterWordText(value)}"><span class="meter-channel-name">${escapeHtml(name)} · ${meterWordLabel(value)}</span><span class="meter-lane"><span class="meter-fill" style="clip-path:inset(${100 - meterPercent(louderMeterChannel(value))}% 0 0)"></span></span>${meterScaleMarkup()}</div>`;
         }).join('');
         return `<div class="meter-group"><strong>${escapeHtml(title)}</strong><div class="meter-values">${channels}</div></div>`;
       }).join('');
@@ -1291,6 +1297,7 @@
       renderPairMeter('main-line', meters.faders.main_line_in_5_6);
       lastMeterRecords = meters.records || [];
       renderControlMeters(lastMeterRecords);
+      globalThis.consoleUi?.meters(lastMeterRecords);
       renderAllMeters(lastMeterRecords);
     }
     function queueMeterSnapshot(meters) {
@@ -1309,7 +1316,7 @@
       meterEventHost = '';
     }
     function loadMeters() {
-      const activeMeterTab = ['inputs', 'outputs', 'mixer'].some(tab => $(`tab-${tab}`).getAttribute('aria-selected') === 'true');
+      const activeMeterTab = ['inputs', 'outputs', 'mixer', 'aux', 'diagnostics'].some(tab => $(`tab-${tab}`).getAttribute('aria-selected') === 'true');
       if (document.hidden || !activeMeterTab) {
         stopMeterStream();
         return;
@@ -1422,9 +1429,9 @@
     // HTTP has no verified push subscription yet, so polling remains the
     // recovery path for physical-panel input changes.
     setInterval(() => {
-      if (!document.hidden) {
+      if (!document.hidden && $('tab-inputs').getAttribute('aria-selected') === 'true') {
         loadPreamps({ quiet: true });
-        if ($('tab-inputs').getAttribute('aria-selected') === 'true') loadLineInputGains({ quiet: true });
+        loadLineInputGains({ quiet: true });
       }
     }, 750);
     setInterval(() => {
@@ -1455,5 +1462,7 @@
     loadMeterLabels();
     loadMeters();
   </script>
+  <script>__CONSOLE_MODEL__</script>
+  <script>__CONSOLE_JS__</script>
 </body>
 </html>

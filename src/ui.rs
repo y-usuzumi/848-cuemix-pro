@@ -2,6 +2,10 @@ use crate::discovery::{browser_control_hosts, DiscoveryResult};
 
 pub(crate) fn render(default_host: &str, session_token: &str) -> String {
     include_str!("ui.html")
+        .replace("__CONSOLE_CSS__", include_str!("console.css"))
+        .replace("__CONSOLE_PANELS__", include_str!("console_panels.html"))
+        .replace("__CONSOLE_MODEL__", include_str!("console_model.js"))
+        .replace("__CONSOLE_JS__", include_str!("console.js"))
         .replace("__DEFAULT_HOST__", &html_escape(default_host))
         .replace("__SESSION_TOKEN__", session_token)
 }
@@ -93,7 +97,10 @@ mod tests {
         for (tab, panel) in [
             ("inputs", "panel-inputs"),
             ("outputs", "panel-outputs"),
+            ("patchbay", "panel-patchbay"),
+            ("routing", "panel-routing"),
             ("mixer", "panel-mixer"),
+            ("aux", "panel-aux"),
             ("diagnostics", "panel-diagnostics"),
         ] {
             assert!(html.contains(&format!("id=\"tab-{tab}\"")));
@@ -168,7 +175,7 @@ mod tests {
         assert!(html.contains("const meterDbPerStep = 0.5"));
         assert!(html.contains("return -Number(value) * meterDbPerStep"));
         assert!(html.contains("const percent = meterPercent(value)"));
-        assert!(html.contains("fill.style.height = `${percent}%`"));
+        assert!(html.contains("fill.style.clipPath = `inset(${100 - percent}% 0 0)`"));
         assert!(html.contains("class=\"vertical-meter-column\""));
         assert!(html.contains("const meterPeakHoldMs = 1000"));
         assert!(html.contains("function renderMeterPeak("));

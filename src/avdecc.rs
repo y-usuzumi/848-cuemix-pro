@@ -26,6 +26,10 @@ mod avdecc_descriptor;
 #[path = "avdecc_probe.rs"]
 mod avdecc_probe;
 
+#[path = "avdecc_console.rs"]
+mod avdecc_console;
+pub(crate) use avdecc_console::{parse_changes, write_console};
+
 pub(crate) use avdecc_probe::{probe, write_probe_result, DescriptorRead};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -327,43 +331,34 @@ fn set_mixer_fader_once(
     Ok(())
 }
 
-/// Reads the physical line and headphone inventories and their current trims
-/// from the same bounded initial vendor-state snapshot CueMix Pro uses. The
-/// compatibility HTTP output bank does not track CueMix or front-panel changes.
-pub(crate) fn read_output_inventory(
-    host: &str,
-    target_entity_id: u64,
-    timeout: Duration,
-) -> Result<OutputInventory, String> {
-    const CUE_MIX_PROXY_ADDRESS: [u8; 6] = [0x01, 0x00, 0x00, 0x00, 0x01, 0x00];
-    let mut proxy = AvdeccProxy::connect(host, "/", timeout)?;
-    let controller_entity_id = proxy
-        .request_entity_id(CUE_MIX_PROXY_ADDRESS, timeout)?
-        .entity_id
-        .ok_or("AVDECC Proxy did not return a controller identity")?;
-    let (_, state) = proxy.start_vendor_state(target_entity_id, controller_entity_id, timeout)?;
-    Ok(OutputInventory {
-        line_outputs: line_outputs_from_state(&state)?,
-        headphone_outputs: headphone_outputs_from_state(&state)?,
-    })
+pub(crate) struct VendorSnapshot(Vec<VendorStateRecord>);
+
+impl VendorSnapshot {
+    pub(crate) fn console(self) -> Result<avdecc_console::ConsoleState, String> {
+        avdecc_console::ConsoleState::from_records(self.0)
+    }
+
+    pub(crate) fn outputs(&self) -> Result<OutputInventory, String> {
+        Ok(OutputInventory {
+            line_outputs: line_outputs_from_state(&self.0)?,
+            headphone_outputs: headphone_outputs_from_state(&self.0)?,
+        })
+    }
+
+    pub(crate) fn line_inputs(&self) -> Result<Vec<LineInput>, String> {
+        line_inputs_from_state(&self.0)
+    }
 }
 
-/// Reads the line-input gain and polarity inventory from CueMix's bounded
-/// initial vendor-state snapshot. The gain records independently validate the
-/// HTTP Analog bank's inventory; polarity is available only in this snapshot.
-pub(crate) fn read_line_inputs(
-    host: &str,
-    target_entity_id: u64,
-    timeout: Duration,
-) -> Result<Vec<LineInput>, String> {
-    const CUE_MIX_PROXY_ADDRESS: [u8; 6] = [0x01, 0x00, 0x00, 0x00, 0x01, 0x00];
-    let mut proxy = AvdeccProxy::connect(host, "/", timeout)?;
-    let controller_entity_id = proxy
-        .request_entity_id(CUE_MIX_PROXY_ADDRESS, timeout)?
-        .entity_id
-        .ok_or("AVDECC Proxy did not return a controller identity")?;
-    let (_, state) = proxy.start_vendor_state(target_entity_id, controller_entity_id, timeout)?;
-    line_inputs_from_state(&state)
+pub(crate) struct VendorSnapshotRequest {
+    pub(crate) deadline: Instant,
+    pub(crate) reply: mpsc::Sender<Result<VendorSnapshot, String>>,
+}
+
+pub(crate) struct MixerMeterWorker {
+    pub(crate) stop_sender: mpsc::Sender<mpsc::Sender<()>>,
+    pub(crate) state_sender: mpsc::Sender<VendorSnapshotRequest>,
+    pub(crate) meters: Arc<MixerMeterFeed>,
 }
 
 /// Sends one explicitly requested line-input polarity value after rediscovering
@@ -726,15 +721,15 @@ fn output_channels_from_state(
     Ok(channels.into_iter().collect())
 }
 
-/// Starts the capture-validated read-only meter lifecycle on a dedicated
-/// proxy session. The returned receiver owns no hardware controls; dropping
-/// its stop sender closes only the local TCP session.
+/// One read-only proxy session owns metering and fresh inventory reads.
+/// Background refreshes keep this session and its SSE feed alive.
 pub(crate) fn start_mixer_meter_worker(
     host: String,
     target_entity_id: u64,
     timeout: Duration,
-) -> (mpsc::Sender<mpsc::Sender<()>>, Arc<MixerMeterFeed>) {
+) -> MixerMeterWorker {
     let (stop_sender, stop_receiver) = mpsc::channel();
+    let (state_sender, state_receiver) = mpsc::channel();
     let meters = Arc::new(MixerMeterFeed::default());
     let worker_meters = Arc::clone(&meters);
     thread::spawn(move || {
@@ -743,10 +738,15 @@ pub(crate) fn start_mixer_meter_worker(
             target_entity_id,
             timeout,
             stop_receiver,
+            state_receiver,
             worker_meters,
         )
     });
-    (stop_sender, meters)
+    MixerMeterWorker {
+        stop_sender,
+        state_sender,
+        meters,
+    }
 }
 
 fn run_mixer_meter_worker(
@@ -754,6 +754,7 @@ fn run_mixer_meter_worker(
     target_entity_id: u64,
     timeout: Duration,
     stop_receiver: mpsc::Receiver<mpsc::Sender<()>>,
+    state_receiver: mpsc::Receiver<VendorSnapshotRequest>,
     meters: Arc<MixerMeterFeed>,
 ) {
     const RETRY_DELAY: Duration = Duration::from_millis(500);
@@ -767,9 +768,25 @@ fn run_mixer_meter_worker(
         match MixerMeterSession::open(host, target_entity_id, timeout) {
             Ok(mut session) => loop {
                 if let Ok(reply) = stop_receiver.try_recv() {
+                    drop(session);
                     meters.close();
                     let _ = reply.send(());
                     return;
+                }
+                if let Ok(request) = state_receiver.try_recv() {
+                    if Instant::now() >= request.deadline {
+                        let _ = request
+                            .reply
+                            .send(Err("device refresh expired before it could start".into()));
+                    } else {
+                        let result = session.read_state(request.deadline, &meters);
+                        let error = result.as_ref().err().cloned();
+                        let _ = request.reply.send(result.map(VendorSnapshot));
+                        if let Some(error) = error {
+                            update_mixer_meters(&meters, Vec::new(), Some(error));
+                            break;
+                        }
+                    }
                 }
                 match session.poll(timeout) {
                     Ok(records) => update_mixer_meters(&meters, records, None),
@@ -857,6 +874,57 @@ impl MixerMeterSession {
         }
         Ok(records)
     }
+
+    fn read_state(
+        &mut self,
+        deadline: Instant,
+        meters: &Arc<MixerMeterFeed>,
+    ) -> Result<Vec<VendorStateRecord>, String> {
+        const PROTOCOL: [u8; 6] = [0, 1, 0xf2, 0, 0, 1];
+        // An empty request starts a fresh inventory, even on an existing
+        // session. ACK only the preceding STATE sequence; meter requests
+        // share the sequence counter but are not part of that ACK chain.
+        let mut previous = Vec::new();
+        let mut records = Vec::new();
+        let mut last_meter = Instant::now();
+        for _ in 0..256 {
+            let sequence = self.next_sequence;
+            self.next_sequence = sequence.wrapping_add(1);
+            let response = self.proxy.vendor_request(
+                self.target_entity_id,
+                self.controller_entity_id,
+                sequence,
+                PROTOCOL,
+                &previous,
+                refresh_remaining(deadline)?,
+            )?;
+            let state = vendor_response_data(
+                &response,
+                self.target_entity_id,
+                self.controller_entity_id,
+                sequence,
+                PROTOCOL,
+            )?;
+            if state.is_empty() {
+                return Ok(records);
+            }
+            records.extend(parse_vendor_state_records(state)?);
+            previous = sequence.to_be_bytes().to_vec();
+            if last_meter.elapsed() >= Duration::from_millis(20) {
+                let samples = self.poll(refresh_remaining(deadline)?)?;
+                update_mixer_meters(meters, samples, None);
+                last_meter = Instant::now();
+            }
+        }
+        Err("CueMix vendor-state snapshot exceeded 256 pages".into())
+    }
+}
+
+fn refresh_remaining(deadline: Instant) -> Result<Duration, String> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or_else(|| "device refresh timed out".into())
 }
 
 fn parse_mixer_meter_page(data: &[u8]) -> Result<Vec<MixerMeterRecord>, String> {

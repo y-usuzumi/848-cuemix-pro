@@ -8,10 +8,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::avdecc::{
-    read_line_inputs, read_output_inventory, set_headphone_trim, set_line_input_phase,
-    set_line_output_trim, set_mixer_fader, start_mixer_meter_worker, HeadphoneOutput, LineInput,
-    LineOutput, MeterPath, MixerFader, MixerLevel, MixerMeterFeed, MixerMeterRecord, MixerMeters,
-    OutputInventory, OutputTrim,
+    parse_changes, set_headphone_trim, set_line_input_phase, set_line_output_trim, set_mixer_fader,
+    start_mixer_meter_worker, write_console, HeadphoneOutput, LineInput, LineOutput, MeterPath,
+    MixerFader, MixerLevel, MixerMeterFeed, MixerMeterRecord, MixerMeters, OutputInventory,
+    OutputTrim, VendorSnapshot, VendorSnapshotRequest,
 };
 use crate::device::{datastore_write_request, json_escape, percent_decode, DeviceClient};
 use crate::discovery::{browser_control_hosts, discover_avdecc, DiscoveryResult};
@@ -48,27 +48,42 @@ struct MeterHub {
 
 struct MeterWorker {
     stop_sender: mpsc::Sender<mpsc::Sender<()>>,
+    state_sender: mpsc::Sender<VendorSnapshotRequest>,
+    pending_stop: Option<mpsc::Receiver<()>>,
     meters: Arc<MixerMeterFeed>,
 }
 
 impl MeterHub {
-    fn existing_snapshot(&self, host: &str) -> Result<Option<MixerMeters>, String> {
-        let meters = self
-            .workers
-            .lock()
-            .map_err(|_| "meter worker registry is unavailable".to_string())?
+    fn reap_stopped(workers: &mut HashMap<String, MeterWorker>, host: &str) -> Result<(), String> {
+        if let Some(receiver) = workers
             .get(host)
-            .map(|worker| Arc::clone(&worker.meters));
-        meters
+            .and_then(|worker| worker.pending_stop.as_ref())
+        {
+            match receiver.try_recv() {
+                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
+                    workers.remove(host);
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    return Err("device session is closing; retry refresh".into())
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn existing_snapshot(&self, host: &str) -> Result<Option<MixerMeters>, String> {
+        self.existing_feed(host)?
             .map(|meters| meters.snapshot().map(|snapshot| snapshot.meters))
             .transpose()
     }
 
     fn existing_feed(&self, host: &str) -> Result<Option<Arc<MixerMeterFeed>>, String> {
-        self.workers
+        let mut workers = self
+            .workers
             .lock()
-            .map_err(|_| "meter worker registry is unavailable".to_string())
-            .map(|workers| workers.get(host).map(|worker| Arc::clone(&worker.meters)))
+            .map_err(|_| "meter worker registry is unavailable".to_string())?;
+        Self::reap_stopped(&mut workers, host)?;
+        Ok(workers.get(host).map(|worker| Arc::clone(&worker.meters)))
     }
 
     fn start(
@@ -81,12 +96,14 @@ impl MeterHub {
             .workers
             .lock()
             .map_err(|_| "meter worker registry is unavailable".to_string())?;
+        Self::reap_stopped(&mut workers, host)?;
         let worker = workers.entry(host.to_string()).or_insert_with(|| {
-            let (stop_sender, meters) =
-                start_mixer_meter_worker(host.to_string(), target_entity_id, timeout);
+            let worker = start_mixer_meter_worker(host.to_string(), target_entity_id, timeout);
             MeterWorker {
-                stop_sender,
-                meters,
+                stop_sender: worker.stop_sender,
+                state_sender: worker.state_sender,
+                meters: worker.meters,
+                pending_stop: None,
             }
         });
         Ok(Arc::clone(&worker.meters))
@@ -104,22 +121,59 @@ impl MeterHub {
     }
 
     fn stop(&self, host: &str, timeout: Duration) -> Result<(), String> {
-        let worker = self
+        let mut workers = self
             .workers
             .lock()
-            .map_err(|_| "meter worker registry is unavailable".to_string())?
-            .remove(host);
-        let Some(worker) = worker else {
+            .map_err(|_| "meter worker registry is unavailable".to_string())?;
+        let Some(worker) = workers.get_mut(host) else {
             return Ok(());
         };
-        let (stopped_sender, stopped_receiver) = mpsc::channel();
+        if worker.pending_stop.is_none() {
+            let (sender, receiver) = mpsc::channel();
+            if worker.stop_sender.send(sender).is_err() {
+                workers.remove(host);
+                return Ok(());
+            }
+            worker.pending_stop = Some(receiver);
+        }
         worker
-            .stop_sender
-            .send(stopped_sender)
-            .map_err(|_| "meter worker stopped unexpectedly".to_string())?;
-        stopped_receiver
+            .pending_stop
+            .as_ref()
+            .unwrap()
             .recv_timeout(timeout)
-            .map_err(|_| "meter worker did not close its proxy session in time".to_string())
+            .map_err(|_| "meter worker did not close its proxy session in time".to_string())?;
+        workers.remove(host);
+        Ok(())
+    }
+
+    fn read_state(
+        &self,
+        host: &str,
+        target: u64,
+        timeout: Duration,
+    ) -> Result<VendorSnapshot, String> {
+        self.start(host, target, timeout)?;
+        let sender = {
+            let workers = self
+                .workers
+                .lock()
+                .map_err(|_| "meter worker registry is unavailable")?;
+            let worker = workers.get(host).ok_or("meter worker is unavailable")?;
+            if worker.pending_stop.is_some() {
+                return Err("device session is closing; retry refresh".into());
+            }
+            worker.state_sender.clone()
+        };
+        let (reply, receiver) = mpsc::channel();
+        sender
+            .send(VendorSnapshotRequest {
+                deadline: Instant::now() + timeout,
+                reply,
+            })
+            .map_err(|_| "device session is unavailable".to_string())?;
+        receiver
+            .recv_timeout(timeout)
+            .map_err(|_| "device refresh timed out".to_string())?
     }
 }
 
@@ -553,6 +607,46 @@ fn route_browser_request(
             let params = parse_query(query);
             proxy_get_or_error(&params, scope, timeout)
         }
+        ("GET", "/api/console") => {
+            let params = parse_query(query);
+            let (host, target) = match vendor_target(&params, scope, timeout) {
+                Ok(target) => target,
+                Err(error) => return error,
+            };
+            match meter_hub
+                .read_state(&host, target, timeout)
+                .and_then(VendorSnapshot::console)
+            {
+                Ok(state) => json_response(200, state.json()),
+                Err(error) => json_error(502, &error),
+            }
+        }
+        ("POST", "/api/console/changes") => {
+            let mut params = parse_query(query);
+            params.extend(parse_query(body));
+            if !is_authorized(origin, params.get("token"), expected_origin, session_token) {
+                return json_error(403, "invalid origin or session token");
+            }
+            let changes = match params
+                .get("changes")
+                .ok_or_else(|| "missing changes".to_string())
+                .and_then(|s| parse_changes(s))
+            {
+                Ok(changes) => changes,
+                Err(error) => return json_error(400, &error),
+            };
+            let (host, target) = match vendor_target(&params, scope, timeout) {
+                Ok(target) => target,
+                Err(error) => return error,
+            };
+            if let Err(error) = meter_hub.stop(&host, timeout) {
+                return json_error(502, &error);
+            }
+            match write_console(&host, target, &changes, timeout) {
+                Ok(applied) => json_response(200, format!(r#"{{"acknowledged":{applied}}}"#)),
+                Err(error) => json_response(if error.conflict { 409 } else { 502 }, error.json()),
+            }
+        }
         ("GET", "/api/mixer/meters") => {
             let params = parse_query(query);
             proxy_mixer_meters_or_error(&params, scope, meter_hub, timeout)
@@ -788,13 +882,10 @@ fn proxy_outputs_or_error(
         Ok(target) => target,
         Err(response) => return response,
     };
-    // The meter worker owns a persistent vendor session. Close only that local
-    // session before taking the bounded initial-state snapshot used to discover
-    // physical outputs and their current trims.
-    if let Err(error) = meter_hub.stop(&host, timeout) {
-        return json_error(502, &error);
-    }
-    match read_output_inventory(&host, target_entity_id, timeout) {
+    match meter_hub
+        .read_state(&host, target_entity_id, timeout)
+        .and_then(|state| state.outputs())
+    {
         Ok(inventory) => json_response(200, output_inventory_json(&inventory)),
         Err(error) => json_error(502, &error),
     }
@@ -810,10 +901,10 @@ fn proxy_headphones_or_error(
         Ok(target) => target,
         Err(response) => return response,
     };
-    if let Err(error) = meter_hub.stop(&host, timeout) {
-        return json_error(502, &error);
-    }
-    match read_output_inventory(&host, target_entity_id, timeout) {
+    match meter_hub
+        .read_state(&host, target_entity_id, timeout)
+        .and_then(|state| state.outputs())
+    {
         Ok(inventory) => json_response(200, headphone_outputs_json(&inventory.headphone_outputs)),
         Err(error) => json_error(502, &error),
     }
@@ -917,10 +1008,10 @@ fn proxy_line_inputs_or_error(
         Ok(target) => target,
         Err(response) => return response,
     };
-    if let Err(error) = meter_hub.stop(&host, timeout) {
-        return json_error(502, &error);
-    }
-    match read_line_inputs(&host, target_entity_id, timeout) {
+    match meter_hub
+        .read_state(&host, target_entity_id, timeout)
+        .and_then(|state| state.line_inputs())
+    {
         Ok(inputs) => json_response(200, line_inputs_json(&inputs)),
         Err(error) => json_error(502, &error),
     }
