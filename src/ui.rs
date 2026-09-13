@@ -1,12 +1,24 @@
 use crate::discovery::{browser_control_hosts, DiscoveryResult};
 
-pub(crate) fn render(default_host: &str, session_token: &str) -> String {
+pub(crate) fn render(default_host: &str, session_token: &str, home: bool) -> String {
     include_str!("ui.html")
         .replace("__CONSOLE_CSS__", include_str!("console.css"))
+        .replace("__CONSOLE_SHELL_CSS__", include_str!("console_shell.css"))
+        .replace("__LAYOUT_JS__", include_str!("ui_layout.js"))
         .replace("__CONSOLE_PANELS__", include_str!("console_panels.html"))
         .replace("__CONSOLE_MODEL__", include_str!("console_model.js"))
         .replace("__MONITOR_JS__", include_str!("monitor.js"))
+        .replace("__SLIDER_QUEUE_JS__", include_str!("slider_queue.js"))
+        .replace("__DB_ENTRY_JS__", include_str!("db_entry.js"))
         .replace("__CONSOLE_JS__", include_str!("console.js"))
+        .replace(
+            "__DEVICE_HOME_LINK__",
+            if home {
+                r#"<a class="device-home" href="/">← Devices</a>"#
+            } else {
+                ""
+            },
+        )
         .replace("__DEFAULT_HOST__", &html_escape(default_host))
         .replace("__SESSION_TOKEN__", session_token)
 }
@@ -19,60 +31,37 @@ fn html_escape(input: &str) -> String {
         .replace('"', "&quot;")
 }
 
-pub(crate) fn render_discovery(results: &[DiscoveryResult]) -> String {
-    let devices = results
-        .iter()
-        .map(|result| {
-            let links = browser_control_hosts(result)
-                .into_iter()
-                .map(|host| {
-                    format!(
-                        r#"<a class="open" href="/?host={}">Open {}</a>"#,
-                        query_component(&host),
-                        html_escape(&host)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("");
-            let addresses = result
-                .addresses
-                .iter()
-                .map(|address| format!(r#"<code>{}</code>"#, html_escape(address)))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let txt = result
-                .txt
-                .iter()
-                .map(|value| format!(r#"<li>{}</li>"#, html_escape(value)))
-                .collect::<Vec<_>>()
-                .join("");
-            format!(
-                r#"<article class="device"><h2>{}</h2><p class="host">{} · AVDECC Proxy {}</p><p class="addresses">{}</p><div class="opens">{}</div><ul>{}</ul></article>"#,
-                html_escape(&result.instance),
-                html_escape(&result.host),
-                result.port,
-                addresses,
-                if links.is_empty() {
-                    r#"<span class="muted">No usable HTTP control address was advertised.</span>"#
-                } else {
-                    &links
-                },
-                txt
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("");
-    let devices = if devices.is_empty() {
-        r#"<p class="empty">No 848 was found. Stop and restart this server to scan again.</p>"#
-            .to_string()
-    } else {
-        devices
-    };
-    format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>cuemix-848 discovery</title><style>
-:root{{color-scheme:light dark;--bg:#f6f7f4;--ink:#171916;--muted:#5a6157;--panel:#fff;--line:#cfd8c8;--accent:#1f7a5f;--accent-ink:#fff}}@media(prefers-color-scheme:dark){{:root{{--bg:#121512;--ink:#f4f6f1;--muted:#a8b0a4;--panel:#1c211d;--line:#394238;--accent:#60c1a1;--accent-ink:#07140f}}}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}}main{{width:min(900px,calc(100vw - 32px));margin:0 auto;padding:28px 0}}h1{{margin:0;font-size:24px}}.sub,.muted,.host{{color:var(--muted)}}.device{{margin-top:16px;padding:18px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}}h2{{margin:0;font-size:17px}}p{{margin:8px 0}}code{{display:inline-block;margin:2px 6px 2px 0;padding:2px 5px;border-radius:4px;background:color-mix(in srgb,var(--panel),var(--ink) 8%);font-family:ui-monospace,SFMono-Regular,Consolas,monospace}}.opens{{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}}.open{{padding:7px 10px;border-radius:5px;background:var(--accent);color:var(--accent-ink);text-decoration:none;font-weight:650}}ul{{margin:10px 0 0;padding-left:20px;color:var(--muted);font-size:12px}}.empty{{margin-top:22px;color:var(--muted)}}</style></head><body><main><h1>cuemix-848</h1><p class="sub">Discovered AVDECC devices</p>{}</main></body></html>"#,
-        devices
-    )
+pub(crate) fn render_discovery(
+    results: &[DiscoveryResult],
+    session_token: &str,
+    error: Option<&str>,
+) -> String {
+    let error = error
+        .map(|error| format!("Discovery unavailable: {error}. You can still connect by IP."))
+        .unwrap_or_default();
+    include_str!("home.html")
+        .replace("__HOME_JS__", include_str!("home.js"))
+        .replace("__SESSION_TOKEN__", session_token)
+        .replace("__DISCOVERY_ERROR__", &html_escape(&error))
+        .replace("__DEVICES__", &render_device_list(results))
+}
+
+pub(crate) fn render_device_list(results: &[DiscoveryResult]) -> String {
+    if results.is_empty() {
+        return r#"<div class="empty"><strong>No devices found yet</strong><p>Check that your 848 is powered on and connected to the network, then scan again or enter its IP address.</p></div>"#.into();
+    }
+    results.iter().map(|result| {
+        let name = result.instance.strip_suffix("._avdecc._tcp.local").unwrap_or(&result.instance);
+        let links = browser_control_hosts(result).into_iter().map(|host| format!(
+            r#"<a class="device-address" href="/?host={}" data-device-host="{}"><code>{}</code><span>Connect ↗</span></a>"#,
+            query_component(&host), html_escape(&host), html_escape(&host)
+        )).collect::<Vec<_>>().join("");
+        format!(
+            r#"<article class="device"><div class="device-head"><span class="device-icon" aria-hidden="true">≋</span><div><h3>{}</h3><p class="device-host">{}</p></div></div><div class="device-addresses">{}</div></article>"#,
+            html_escape(name), html_escape(&result.host),
+            if links.is_empty() { r#"<p>No usable address was advertised. Connect by IP instead.</p>"# } else { &links },
+        )
+    }).collect::<Vec<_>>().join("")
 }
 
 fn query_component(input: &str) -> String {
@@ -92,8 +81,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn renders_controls_in_accessible_tab_panels() {
-        let html = render("192.168.4.166", "session-token");
+    fn discovery_page_escapes_device_text_and_keeps_manual_connection_on_errors() {
+        let result = DiscoveryResult {
+            instance: "<script>alert(1)</script>._avdecc._tcp.local".into(),
+            host: "\"<img src=x>".into(),
+            port: 17221,
+            addresses: vec!["[bad]".into(), "fe80::1%eth2".into()],
+            txt: Vec::new(),
+        };
+        let page = render_discovery(&[result], "secret", Some("<network failed>"));
+        assert!(!page.contains("<script>alert(1)</script>"));
+        assert!(!page.contains("<img src=x>"));
+        assert!(page.contains("&lt;network failed&gt;"));
+        assert!(page.contains("/?host=%5Bfe80%3A%3A1%25eth2%5D"));
+        assert!(page.contains("id=\"manualConnect\""));
+        assert!(page.contains("Scan again"));
+        assert!(!page.contains("__HOME_JS__"));
+        assert!(!render("192.168.1.50", "secret", false).contains("← Devices"));
+        assert!(render("192.168.1.50", "secret", true).contains("← Devices"));
+    }
+
+    #[test]
+    fn renders_named_workspaces_and_persistent_monitor_controls() {
+        let html = render("192.168.4.166", "session-token", false);
+        assert!(!html.contains("__DB_ENTRY_JS__"));
+        assert!(html.contains("CueMixDb.mount(document"));
 
         for (tab, panel) in [
             ("inputs", "panel-inputs"),
@@ -131,7 +143,14 @@ mod tests {
             .expect("outputs panel contents");
         assert!(outputs.contains("Line Output Gains"));
         assert!(outputs.contains("Phones"));
-        assert!(outputs.contains("id=\"phoneOut\""));
+        assert!(!outputs.contains("id=\"phoneOut\""));
+        assert!(html.contains("class=\"monitor-rail console-panel\""));
+        assert!(html.contains("id=\"phoneOut\""));
+        assert!(html.contains("id=\"monitorSetupControls\""));
+        assert!(html.contains("id=\"mixPages\""));
+        assert!(html.contains("id=\"auxPages\""));
+        assert!(!html.contains("__LAYOUT_JS__"));
+        assert!(!html.contains("__CONSOLE_SHELL_CSS__"));
         assert!(!outputs.contains("Mic Preamps"));
         assert!(html.contains("fetchJson('/api/outputs?'"));
         assert!(html.contains("/api/outputs/line-trim"));
@@ -195,9 +214,11 @@ mod tests {
             addresses: vec!["192.168.4.166".to_string(), "fe80::1".to_string()],
             txt: vec!["Version=1".to_string()],
         };
-        let html = render_discovery(&[result]);
+        let html = render_discovery(&[result], "session-token", None);
         assert!(html.contains("/?host=192.168.4.166"));
         assert!(!html.contains("/?host=%5Bfe80%3A%3A1%5D"));
-        assert!(html.contains("Version=1"));
+        assert!(html.contains("Connect by IP"));
+        assert!(html.contains("data-device-host=\"192.168.4.166\""));
+        assert!(!html.contains("__DEVICES__"));
     }
 }

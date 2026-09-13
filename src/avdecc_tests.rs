@@ -432,6 +432,15 @@ fn simulated_meter_peer_with_lost_updates(
     reject_write: bool,
     lose_updates: bool,
 ) -> (String, thread::JoinHandle<Vec<u8>>) {
+    simulated_meter_peer_with_write_behavior(reject_write, lose_updates, false, false)
+}
+
+fn simulated_meter_peer_with_write_behavior(
+    reject_write: bool,
+    lose_updates: bool,
+    ignore_write: bool,
+    drop_ack: bool,
+) -> (String, thread::JoinHandle<Vec<u8>>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let peer = thread::spawn(move || {
@@ -456,6 +465,32 @@ fn simulated_meter_peer_with_lost_updates(
         let mut muted = 0u8;
         let mut mono = 0u8;
         let mut talking = 0u8;
+        let mut line_trims = [0u8; 2];
+        let mut phone_trims = [30u8, 31, 40, 41];
+        let mut additional: BTreeMap<(u16, u16), Vec<u8>> = [
+            ((0x1389, 0), vec![45]),
+            ((0x1389, 2), vec![0]),
+            ((0x13b2, 3), vec![20]),
+            ((0x13b2, 6), vec![0]),
+            ((0x03e8, 10), vec![0]),
+            ((0x0420, 0), vec![1, 0, 0, 0]),
+            ((0x0420, 1), vec![1, 0, 0, 0]),
+            ((0x0434, 0), vec![1, 0, 0, 0]),
+            ((0x0434, 1), vec![1, 0, 0, 0]),
+            ((0x0403, 0), vec![1, 0, 0, 0]),
+            ((0x0403, 1), vec![1, 0, 0, 0]),
+            ((0x0403, 25), vec![1, 0, 0, 0]),
+            ((0x841a, 0x0a00), vec![0, 0x40, 0x4d, 0xe6]),
+            ((0x842e, 0x0a00), vec![0, 0x40, 0x4d, 0xe6]),
+            ((0x83f8, 0x0a00), vec![0, 0, 0, 0]),
+            ((0x83f8, 0x0a01), vec![0, 0, 0, 0]),
+            ((0x83f8, 0x0a19), vec![0, 0, 0, 0]),
+            ((0x842b, 0x0a00), vec![0, 0x80, 0, 0]),
+            ((0x843f, 0x0a00), vec![0, 0x80, 0, 0]),
+            ((0x83f9, 0x0a19), vec![0, 0x80, 0, 0]),
+        ]
+        .into_iter()
+        .collect();
         let mut external_sent = false;
         loop {
             let mut header = [0; 12];
@@ -485,7 +520,7 @@ fn simulated_meter_peer_with_lost_updates(
                     trace.push(1);
                     thread::sleep(Duration::from_millis(25));
                     terminal = true;
-                    vec![
+                    let mut data = vec![
                         0x03,
                         0xfb,
                         0,
@@ -552,14 +587,45 @@ fn simulated_meter_peer_with_lost_updates(
                         0,
                         0,
                         1,
-                        0,
+                        line_trims[0],
                         0x13,
                         0x88,
                         0,
                         1,
                         1,
+                        line_trims[1],
+                        0x13,
+                        0xb7,
                         0,
-                    ]
+                        2,
+                        1,
+                        phone_trims[0],
+                        0x13,
+                        0xb7,
+                        0,
+                        3,
+                        1,
+                        phone_trims[1],
+                        0x13,
+                        0xb7,
+                        0,
+                        6,
+                        1,
+                        phone_trims[2],
+                        0x13,
+                        0xb7,
+                        0,
+                        7,
+                        1,
+                        phone_trims[3],
+                    ];
+                    for (&(property, index), value) in &additional {
+                        data.extend(property.to_be_bytes());
+                        data.extend(index.to_be_bytes());
+                        data.push(value.len() as u8);
+                        data.extend(value);
+                    }
+                    data
                 } else {
                     assert_eq!(
                         &frame.payload[28..],
@@ -592,15 +658,35 @@ fn simulated_meter_peer_with_lost_updates(
                 }
             } else if protocol == 3 {
                 trace.push(3);
-                assert_eq!(&frame.payload[30..33], &[0, 0, 1]);
-                if !reject_write {
-                    match &frame.payload[28..30] {
-                        [0x13, 0x93] => attenuation = frame.payload[33],
-                        [0x13, 0x9b] => muted = frame.payload[33],
-                        [0x13, 0x9a] => mono = frame.payload[33],
-                        [0x13, 0xa3] => talking = frame.payload[33],
-                        _ => panic!("unexpected monitor setter"),
+                for record in parse_vendor_state_records(&frame.payload[28..]).unwrap() {
+                    if let Some(value) =
+                        additional.get_mut(&(record.property_id, record.property_index))
+                    {
+                        assert_eq!(value.len(), record.value.len());
+                        if !reject_write && !ignore_write {
+                            *value = record.value;
+                        }
+                        continue;
                     }
+                    assert_eq!(record.value.len(), 1);
+                    if !reject_write && !ignore_write {
+                        let value = record.value[0];
+                        match (record.property_id, record.property_index) {
+                            (0x1393, 0) => attenuation = value,
+                            (0x139b, 0) => muted = value,
+                            (0x139a, 0) => mono = value,
+                            (0x13a3, 0) => talking = value,
+                            (0x1388, index @ 0..=1) => line_trims[usize::from(index)] = value,
+                            (0x13b7, index) => {
+                                let slot = [2, 3, 6, 7].iter().position(|&i| i == index).unwrap();
+                                phone_trims[slot] = value;
+                            }
+                            _ => panic!("unexpected setter"),
+                        }
+                    }
+                }
+                if drop_ack {
+                    continue;
                 }
                 Vec::new()
             } else {
@@ -725,7 +811,7 @@ fn front_panel_writes_read_back_device_latches_without_touching_level_or_selecti
     )
     .unwrap();
     let (count, state) = session
-        .write_monitor(&changes, Instant::now() + timeout, &meters)
+        .write_console(&changes, Instant::now() + timeout, &meters)
         .unwrap();
     assert_eq!(count, 3);
     assert!(state.revision > before);
@@ -745,7 +831,7 @@ fn front_panel_writes_read_back_device_latches_without_touching_level_or_selecti
     let stale = parse_changes("monitor-mute:monitor:0:01:0;monitor-mono:monitor:0:00:1").unwrap();
     assert!(
         session
-            .write_monitor(&stale, Instant::now() + timeout, &meters)
+            .write_console(&stale, Instant::now() + timeout, &meters)
             .unwrap_err()
             .conflict
     );
@@ -755,7 +841,7 @@ fn front_panel_writes_read_back_device_latches_without_touching_level_or_selecti
     .unwrap();
     assert_eq!(
         session
-            .write_monitor(&no_op, Instant::now() + timeout, &meters)
+            .write_console(&no_op, Instant::now() + timeout, &meters)
             .unwrap()
             .0,
         0
@@ -789,6 +875,358 @@ fn front_panel_writes_read_back_device_latches_without_touching_level_or_selecti
 }
 
 #[test]
+fn continuous_output_trims_share_the_meter_session_and_verify_only_the_selected_channels() {
+    let (address, peer) = simulated_meter_peer_with_monitor(false);
+    let timeout = Duration::from_secs(2);
+    let worker = start_mixer_meter_worker(address, 0x0001_f2ff_fefe_b9e2, timeout);
+    let initial = worker
+        .meters
+        .wait_after(0, timeout)
+        .unwrap()
+        .unwrap()
+        .revision;
+    for (output, trim) in [
+        (OutputTrimTarget::Line(1), OutputTrim::Decibels(-10)),
+        (OutputTrimTarget::Line(1), OutputTrim::Decibels(-11)),
+        (OutputTrimTarget::Line(1), OutputTrim::Decibels(-12)),
+        (
+            OutputTrimTarget::Headphones(1),
+            OutputTrim::NegativeInfinity,
+        ),
+        (OutputTrimTarget::Headphones(1), OutputTrim::Decibels(-45)),
+    ] {
+        let (reply, receiver) = mpsc::channel();
+        worker
+            .write_sender
+            .send(SessionWriteRequest::OutputTrim(OutputTrimWriteRequest {
+                deadline: Instant::now() + timeout,
+                output,
+                trim,
+                reply,
+            }))
+            .unwrap();
+        receiver.recv_timeout(timeout).unwrap().unwrap();
+        let update = worker.meters.snapshot().unwrap();
+        assert!(!update.closed);
+        assert!(update.meters.error.is_none());
+        assert!(update.revision > initial);
+    }
+    // The shared monitor queue continues working after repeated trim updates.
+    let (reply, receiver) = mpsc::channel();
+    worker
+        .write_sender
+        .send(SessionWriteRequest::Console(ConsoleWriteRequest {
+            deadline: Instant::now() + timeout,
+            changes: parse_changes("monitor-mute:monitor:0:00:1").unwrap(),
+            reply,
+        }))
+        .unwrap();
+    receiver.recv_timeout(timeout).unwrap().unwrap();
+    let (reply, receiver) = mpsc::channel();
+    worker
+        .state_sender
+        .send(VendorSnapshotRequest {
+            deadline: Instant::now() + timeout,
+            reply,
+        })
+        .unwrap();
+    let inventory = receiver
+        .recv_timeout(timeout)
+        .unwrap()
+        .unwrap()
+        .outputs()
+        .unwrap();
+    assert_eq!(
+        inventory
+            .line_outputs
+            .iter()
+            .map(|o| o.attenuation)
+            .collect::<Vec<_>>(),
+        [0, 12]
+    );
+    assert_eq!(inventory.headphone_outputs[0].channel_indices, [2, 3]);
+    assert_eq!(inventory.headphone_outputs[0].attenuation, [30, 31]);
+    assert_eq!(inventory.headphone_outputs[1].channel_indices, [6, 7]);
+    assert_eq!(inventory.headphone_outputs[1].attenuation, [45, 45]);
+    let (reply, stopped) = mpsc::channel();
+    worker.stop_sender.send(reply).unwrap();
+    stopped.recv_timeout(timeout).unwrap();
+    // This peer accepts only one TCP connection and enforces an uninterrupted
+    // request sequence, including the state ACK chain across setters/meters.
+    let trace = peer.join().unwrap();
+    assert_eq!(
+        trace.iter().filter(|&&p| p == 3).count(),
+        6,
+        "each stereo pair is one setter, without retries"
+    );
+    assert!(
+        trace.windows(3).any(|p| p == [1, 4, 2]),
+        "meters continue during inventory reads"
+    );
+}
+
+#[test]
+fn output_trim_no_ops_missing_outputs_and_expired_requests_never_send_setters() {
+    let (address, peer) = simulated_meter_peer_with_monitor(false);
+    let timeout = Duration::from_secs(1);
+    let meters = Arc::new(MixerMeterFeed::default());
+    let mut session = MixerMeterSession::open(&address, 0x0001_f2ff_fefe_b9e2, timeout).unwrap();
+    session
+        .write_output_trim(
+            OutputTrimTarget::Line(0),
+            OutputTrim::Decibels(0),
+            Instant::now() + timeout,
+            &meters,
+        )
+        .unwrap();
+    assert!(session
+        .write_output_trim(
+            OutputTrimTarget::Line(2),
+            OutputTrim::Decibels(-1),
+            Instant::now() + timeout,
+            &meters
+        )
+        .unwrap_err()
+        .contains("not advertised"));
+    assert!(session
+        .write_output_trim(
+            OutputTrimTarget::Headphones(2),
+            OutputTrim::Decibels(-1),
+            Instant::now() + timeout,
+            &meters
+        )
+        .unwrap_err()
+        .contains("not advertised"));
+    assert!(session
+        .write_output_trim(
+            OutputTrimTarget::Line(0),
+            OutputTrim::Decibels(-1),
+            Instant::now() - timeout,
+            &meters
+        )
+        .is_err());
+    drop(session);
+    assert!(!peer.join().unwrap().contains(&3));
+}
+
+#[test]
+fn every_slider_uses_one_persistent_worker_with_verified_readback() {
+    let (address, peer) = simulated_meter_peer_with_monitor(false);
+    let timeout = Duration::from_secs(2);
+    let worker = start_mixer_meter_worker(address, 0x0001_f2ff_fefe_b9e2, timeout);
+    let initial = worker
+        .meters
+        .wait_after(0, timeout)
+        .unwrap()
+        .unwrap()
+        .revision;
+    let mut setters = 0;
+    for position in [12, 13, 14] {
+        for input in [InputGainTarget::Preamp(0), InputGainTarget::Line(6)] {
+            let (reply, receiver) = mpsc::channel();
+            worker
+                .write_sender
+                .send(SessionWriteRequest::InputGain(InputGainWriteRequest {
+                    deadline: Instant::now() + timeout,
+                    input,
+                    gain_db: position,
+                    reply,
+                }))
+                .unwrap();
+            receiver.recv_timeout(timeout).unwrap().unwrap();
+            setters += 1;
+        }
+        for output in [OutputTrimTarget::Line(1), OutputTrimTarget::Headphones(1)] {
+            let (reply, receiver) = mpsc::channel();
+            worker
+                .write_sender
+                .send(SessionWriteRequest::OutputTrim(OutputTrimWriteRequest {
+                    deadline: Instant::now() + timeout,
+                    output,
+                    trim: OutputTrim::Decibels(-i16::from(position)),
+                    reply,
+                }))
+                .unwrap();
+            receiver.recv_timeout(timeout).unwrap().unwrap();
+            setters += 1;
+        }
+    }
+    for edit in [
+        "level:main:10:00404de6:-60",
+        "level:main:10:00004189:-6",
+        "level:reverb:10:00404de6:-6",
+        "level:aux-25:10:00000000:-6",
+        "level:aux-0:10:00000000:-6;level:aux-1:10:00000000:-6",
+        "pan:main:10:00800000:-1",
+        "pan:reverb:10:00800000:1",
+        "pan:aux-25:10:00800000:-0.5",
+        "master:main:0:01000000:-6;master:main:1:01000000:-6",
+        "master:reverb:0:01000000:-6;master:reverb:1:01000000:-6",
+        "master:aux-0:0:01000000:-6;master:aux-1:1:01000000:-6",
+        "monitor-level:monitor:0:28:-31",
+    ] {
+        let changes = parse_changes(edit).unwrap();
+        let expected = changes.len();
+        let (reply, receiver) = mpsc::channel();
+        worker
+            .write_sender
+            .send(SessionWriteRequest::Console(ConsoleWriteRequest {
+                deadline: Instant::now() + timeout,
+                changes,
+                reply,
+            }))
+            .unwrap();
+        assert_eq!(receiver.recv_timeout(timeout).unwrap().unwrap().0, expected);
+        setters += expected;
+        let update = worker.meters.snapshot().unwrap();
+        assert!(!update.closed);
+        assert!(update.meters.error.is_none());
+        assert!(update.revision > initial);
+    }
+    let (reply, receiver) = mpsc::channel();
+    worker
+        .state_sender
+        .send(VendorSnapshotRequest {
+            deadline: Instant::now() + timeout,
+            reply,
+        })
+        .unwrap();
+    let state = receiver.recv_timeout(timeout).unwrap().unwrap().0;
+    for (property, index, expected) in [
+        (0x1389, 0, 14),
+        (0x1389, 2, 0),
+        (0x13b2, 6, 14),
+        (0x13b2, 3, 20),
+        (0x1388, 0, 0),
+        (0x1388, 1, 14),
+        (0x13b7, 2, 30),
+        (0x13b7, 3, 31),
+        (0x13b7, 6, 14),
+        (0x13b7, 7, 14),
+    ] {
+        assert_eq!(
+            state
+                .iter()
+                .find(|r| r.property_id == property && r.property_index == index)
+                .unwrap()
+                .value,
+            [expected]
+        );
+    }
+    let (reply, receiver) = mpsc::channel();
+    worker.stop_sender.send(reply).unwrap();
+    receiver.recv_timeout(timeout).unwrap();
+    // The peer accepts just one connection and validates every request/ACK sequence.
+    let trace = peer.join().unwrap();
+    assert_eq!(trace.iter().filter(|&&p| p == 3).count(), setters);
+    assert!(trace.windows(3).any(|p| p == [1, 4, 2]));
+}
+
+#[test]
+fn input_gain_validation_no_ops_and_expiry_never_send_setters() {
+    let (address, peer) = simulated_meter_peer_with_monitor(false);
+    let timeout = Duration::from_secs(1);
+    let meters = Arc::new(MixerMeterFeed::default());
+    let mut session = MixerMeterSession::open(&address, 0x0001_f2ff_fefe_b9e2, timeout).unwrap();
+    for (input, value, valid) in [
+        (InputGainTarget::Preamp(0), 45, true),
+        (InputGainTarget::Line(3), 20, true),
+        (InputGainTarget::Preamp(0), 75, false),
+        (InputGainTarget::Line(3), 21, false),
+        (InputGainTarget::Preamp(1), 40, false),
+        (InputGainTarget::Line(1), 12, false),
+    ] {
+        assert_eq!(
+            session
+                .write_input_gain(input, value, Instant::now() + timeout, &meters)
+                .is_ok(),
+            valid
+        );
+    }
+    assert!(session
+        .write_input_gain(
+            InputGainTarget::Preamp(0),
+            42,
+            Instant::now() - timeout,
+            &meters
+        )
+        .is_err());
+    drop(session);
+    assert!(!peer.join().unwrap().contains(&3));
+}
+
+#[test]
+fn input_and_console_rejection_lost_ack_and_readback_mismatch_never_retry() {
+    for console in [false, true] {
+        for (reject, ignore, drop_ack, expected) in [
+            (true, false, false, "status 1"),
+            (false, true, false, "readback differs"),
+            (false, false, true, "outcome unknown"),
+        ] {
+            let (address, peer) =
+                simulated_meter_peer_with_write_behavior(reject, true, ignore, drop_ack);
+            let timeout = Duration::from_millis(300);
+            let meters = Arc::new(MixerMeterFeed::default());
+            let mut session =
+                MixerMeterSession::open(&address, 0x0001_f2ff_fefe_b9e2, timeout).unwrap();
+            let error = if console {
+                let changes =
+                    parse_changes("level:main:10:00404de6:-6;master:main:0:01000000:-6").unwrap();
+                let error = session
+                    .write_console(&changes, Instant::now() + timeout, &meters)
+                    .unwrap_err();
+                assert_eq!(error.applied, if ignore { 2 } else { 0 });
+                error.message
+            } else {
+                session
+                    .write_input_gain(
+                        InputGainTarget::Preamp(0),
+                        42,
+                        Instant::now() + timeout,
+                        &meters,
+                    )
+                    .unwrap_err()
+            };
+            assert!(error.contains(expected), "{error}");
+            drop(session);
+            let trace = peer.join().unwrap();
+            assert_eq!(
+                trace.iter().filter(|&&p| p == 3).count(),
+                if console && ignore { 2 } else { 1 }
+            );
+        }
+    }
+}
+
+#[test]
+fn output_trim_rejection_lost_ack_and_readback_mismatch_do_not_retry() {
+    for (reject, ignore, drop_ack, expected) in [
+        (true, false, false, "status 1"),
+        (false, true, false, "readback differs"),
+        (false, false, true, "outcome unknown"),
+    ] {
+        let (address, peer) =
+            simulated_meter_peer_with_write_behavior(reject, false, ignore, drop_ack);
+        let timeout = Duration::from_secs(1);
+        let meters = Arc::new(MixerMeterFeed::default());
+        let mut session =
+            MixerMeterSession::open(&address, 0x0001_f2ff_fefe_b9e2, timeout).unwrap();
+        let error = session
+            .write_output_trim(
+                OutputTrimTarget::Headphones(1),
+                OutputTrim::Decibels(-35),
+                Instant::now() + timeout,
+                &meters,
+            )
+            .unwrap_err();
+        assert!(error.contains(expected), "{error}");
+        drop(session);
+        let trace = peer.join().unwrap();
+        assert_eq!(trace.iter().filter(|&&p| p == 3).count(), 1);
+    }
+}
+
+#[test]
 fn monitor_events_and_writes_share_one_session_with_readback_and_no_retries() {
     for reject in [false, true] {
         let (address, peer) = simulated_meter_peer_with_monitor(reject);
@@ -804,7 +1242,7 @@ fn monitor_events_and_writes_share_one_session_with_readback_and_no_retries() {
         );
         let before = session.monitor_revision;
         let changes = parse_changes("monitor-level:monitor:0:28:-31").unwrap();
-        let result = session.write_monitor(&changes, Instant::now() + timeout, &meters);
+        let result = session.write_console(&changes, Instant::now() + timeout, &meters);
         if reject {
             assert!(result.unwrap_err().message.contains("status 1"));
         } else {
@@ -815,20 +1253,20 @@ fn monitor_events_and_writes_share_one_session_with_readback_and_no_retries() {
             session.poll(timeout).unwrap();
             assert!(
                 session
-                    .write_monitor(&changes, Instant::now() + timeout, &meters)
+                    .write_console(&changes, Instant::now() + timeout, &meters)
                     .unwrap_err()
                     .conflict
             );
             let no_op = parse_changes("monitor-level:monitor:0:1f:-31").unwrap();
             assert_eq!(
                 session
-                    .write_monitor(&no_op, Instant::now() + timeout, &meters)
+                    .write_console(&no_op, Instant::now() + timeout, &meters)
                     .unwrap()
                     .0,
                 0
             );
             assert!(session
-                .write_monitor(&no_op, Instant::now() - timeout, &meters)
+                .write_console(&no_op, Instant::now() - timeout, &meters)
                 .is_err());
         }
         drop(session);
@@ -899,14 +1337,14 @@ fn lost_monitor_events_cannot_validate_stale_writes_or_hide_write_readback() {
     let stale = parse_changes("monitor-level:monitor:0:1e:-31").unwrap();
     assert!(
         session
-            .write_monitor(&stale, Instant::now() + timeout, &meters)
+            .write_console(&stale, Instant::now() + timeout, &meters)
             .unwrap_err()
             .conflict
     );
     assert_eq!(session.state.get(&(0x1393, 0)), Some(&vec![45]));
     let desired = parse_changes("monitor-level:monitor:0:2d:-44").unwrap();
     let (count, state) = session
-        .write_monitor(&desired, Instant::now() + timeout, &meters)
+        .write_console(&desired, Instant::now() + timeout, &meters)
         .unwrap();
     assert_eq!(count, 1);
     assert!(

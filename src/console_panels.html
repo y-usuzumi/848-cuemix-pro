@@ -1,33 +1,29 @@
-    <section id="panel-patchbay" class="tab-panel console-panel" role="tabpanel" aria-labelledby="tab-patchbay" tabindex="0" hidden>
-      <div class="console-heading"><div><h2>Patchbay</h2><p>Choose what each output receives. Review your connections before applying them.</p></div><button class="secondary console-refresh">Refresh</button></div>
-      <div class="console-status" role="status" aria-live="polite"></div>
-      <div class="console-toolbar"><label>Destination group<select id="patchGroup"></select></label><label class="console-grow">Find a connection<input id="patchSearch" type="search" placeholder="Channel or source name"></label></div>
+    <section id="panel-patchbay" class="tab-panel console-panel" role="region" aria-labelledby="tab-patchbay" hidden>
+      <div class="console-heading"><div><div class="eyebrow">SIGNAL FLOW</div><h2>Connections</h2></div></div>
+      <div class="console-toolbar"><label>Destination group<select id="patchGroup"></select></label><label class="console-grow">Find a connection<input id="patchSearch" type="search" placeholder="Channel or source"></label><button class="secondary console-refresh" aria-label="Refresh connections">Refresh</button></div>
+      <div id="patchPages" class="console-pages"></div>
       <div class="patch-layout">
-        <div><div id="patchList" class="patch-list"><p class="empty">Open this view to load connections.</p></div><div id="patchPages" class="console-pages"></div></div>
-        <aside class="route-builder"><h3>Make a connection</h3><label>Starting destination<select id="patchDestination"></select></label><label>Find a source<input id="sourceSearch" type="search" placeholder="Mic, host, aux…"></label><label>Starting source<select id="patchSource"></select></label><div class="console-toolbar"><label>Channels<input id="patchCount" type="number" min="1" max="32" value="2"></label><label>Assignment<select id="patchMode"><option value="sequential">In order</option><option value="duplicate">Same source</option></select></label></div><button id="stagePatch">Stage connection</button><p class="muted">“In order” connects consecutive source and destination channels. Use one channel for mono or two for stereo.</p></aside>
+        <div id="patchList" class="patch-list"><p class="empty">Loading connections…</p></div>
+        <aside class="route-builder"><h3>Make a connection</h3><label>Starting destination<select id="patchDestination"></select></label><label>Find a source<input id="sourceSearch" type="search" placeholder="Mic, host, aux…"></label><label>Starting source<select id="patchSource"></select></label><div class="console-toolbar"><label>Channels<input id="patchCount" type="number" min="1" max="32" value="2"></label><label>Assignment<select id="patchMode"><option value="sequential">In order</option><option value="duplicate">Same source</option></select></label></div><button id="stagePatch">Stage connection</button><p>One channel for mono, two for stereo. Review staged connections before applying.</p></aside>
       </div>
     </section>
-    <section id="panel-routing" class="tab-panel console-panel" role="tabpanel" aria-labelledby="tab-routing" tabindex="0" hidden>
-      <div class="console-heading"><div><h2>Routing</h2><p>Sources across the top, destinations down the side. Select a cell to stage a connection.</p></div><button class="secondary console-refresh">Refresh</button></div>
-      <div class="console-status" role="status" aria-live="polite"></div>
-      <div class="console-toolbar"><label>Destinations<select id="matrixDestGroup"></select></label><label>Sources<select id="matrixSourceGroup"></select></label><div class="matrix-legend"><span class="route-dot"></span> Connected <span class="route-dot planned"></span> Staged</div></div>
-      <div id="matrixPages" class="console-pages"></div><div id="routingMatrix" class="routing-matrix"><p class="empty">Open this view to load the matrix.</p></div>
+    <section id="panel-routing" class="tab-panel console-panel" role="region" aria-labelledby="tab-routing" hidden>
+      <div class="console-heading"><div><div class="eyebrow">SIGNAL FLOW</div><h2>Connections</h2></div></div>
+      <div class="console-toolbar"><label>Destinations<select id="matrixDestGroup"></select></label><label>Sources<select id="matrixSourceGroup"></select></label><div class="matrix-legend"><span class="route-dot"></span> Connected <span class="route-dot planned"></span> Staged</div><button class="secondary console-refresh" aria-label="Refresh routing">Refresh</button></div>
+      <div id="matrixPages" class="console-pages"></div><div id="routingMatrix" class="routing-matrix"><p class="empty">Loading matrix…</p></div>
+      <p class="workspace-note">Sources across the top, destinations down the side. Select a cell to stage a connection.</p>
     </section>
-    <section id="panel-mixer" class="tab-panel console-panel" role="tabpanel" aria-labelledby="tab-mixer" tabindex="0" hidden>
-      <div class="console-heading"><div><h2>Mixing</h2><p>Build a mix for an output bus. Levels save when you release a fader.</p></div><button class="secondary console-refresh">Refresh</button></div>
-      <div class="console-status" role="status" aria-live="polite"></div>
-      <div class="console-toolbar"><label>Mix bus<select id="mixBus"></select></label><label class="console-grow">Find an input<input id="mixSearch" type="search" placeholder="Channel or source name"></label><label class="console-check"><input id="mixActiveOnly" type="checkbox"> Active sends only</label></div>
-      <div class="mix-layout"><div id="consoleStrips" class="console-strips"></div><aside id="consoleMaster" class="console-master"></aside></div>
-      <p class="muted console-footnote">Stereo inputs follow the device’s links. Input mute and solo affect that channel across mixes. Channel meters show the mixer input signal.</p>
+    <section id="panel-mixer" class="tab-panel console-panel" role="region" aria-labelledby="tab-mixer" hidden>
+      <div class="console-heading"><div><div class="eyebrow">MIX BUS</div><h2>Mixing</h2></div></div>
+      <div class="console-toolbar"><label>Mix bus<select id="mixBus"></select></label><label class="console-grow">Find an input<input id="mixSearch" type="search" placeholder="Channel or source"></label><label class="console-check"><input id="mixActiveOnly" type="checkbox"> Active sends</label><button class="secondary console-refresh" aria-label="Refresh mixes">Refresh</button></div>
+      <div id="mixPages" class="console-pages"></div>
+      <div class="mix-layout"><div id="consoleStrips" class="console-strips"></div><aside id="consoleMaster" class="console-master" aria-label="Bus master"></aside></div>
+      <p class="console-footnote">Faders save while dragging. Input mute and solo affect the input across all mixes.</p>
     </section>
-    <section id="panel-aux" class="tab-panel console-panel" role="tabpanel" aria-labelledby="tab-aux" tabindex="0" hidden>
-      <div class="console-heading"><div><h2>Aux mixing</h2><p>Send one input to several mixes. Each send has its own level and pan.</p></div><button class="secondary console-refresh">Refresh</button></div>
-      <div class="console-status" role="status" aria-live="polite"></div>
-      <div class="console-toolbar"><label class="console-grow">Input channel<select id="auxInput"></select></label></div>
+    <section id="panel-aux" class="tab-panel console-panel" role="region" aria-labelledby="tab-aux" hidden>
+      <div class="console-heading"><div><div class="eyebrow">SEND FROM</div><h2>Aux sends</h2></div></div>
+      <div class="console-toolbar"><label class="console-grow">Input channel<select id="auxInput"></select></label><button class="secondary console-refresh" aria-label="Refresh aux sends">Refresh</button></div>
+      <div id="auxPages" class="console-pages"></div>
       <div id="auxSends" class="console-strips"></div>
-      <p class="muted console-footnote">Pre/post is a bus setting and affects every input sent to that bus. Bus masters are available in Mixing.</p>
+      <p class="console-footnote">Pre/post affects every input sent to that bus. Masters are available in By mix bus.</p>
     </section>
-    <aside id="consoleDraftTray" class="console-draft-tray" aria-label="Staged routing changes" hidden>
-      <div class="console-heading"><div><strong id="draftCount">No staged changes</strong><p id="draftHint">Your hardware changes only when you apply.</p></div><div class="console-toolbar"><button id="discardRoutes" class="secondary">Discard</button><button id="applyRoutes">Apply connections</button></div></div>
-      <details id="draftDetails"><summary>Review connections</summary><div id="draftList"></div></details>
-    </aside>

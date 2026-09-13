@@ -10,10 +10,7 @@ use crate::server::serve;
 
 pub(crate) fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
-    let Some(command) = args.next() else {
-        print_usage();
-        return Ok(());
-    };
+    let command = args.next().unwrap_or_else(|| "serve".to_string());
 
     match command.as_str() {
         "discover" => {
@@ -84,12 +81,15 @@ fn print_usage() {
     eprintln!(
         "cuemix-848\n\n\
          Usage:\n\
+           cuemix-848\n\
            cuemix-848 discover [--timeout-ms n]\n\
            cuemix-848 avdecc-probe <host> [--path /] [--request-entity-id interface] [--read-entity-descriptor id|--read-configuration-descriptor id|--read-descriptor id type index] [--timeout-ms n]\n\
            cuemix-848 probe <host> [--save file] [--timeout-ms n]\n\
            cuemix-848 get <host> <path> [--save file] [--timeout-ms n]\n\
            cuemix-848 set <host> <datastore-path> <value> [--method POST|PATCH] [--timeout-ms n]\n\
-           cuemix-848 serve <host> [--listen 127.0.0.1:8480] [--timeout-ms n]\n\n\
+           cuemix-848 serve [host] [--listen 127.0.0.1:8480] [--timeout-ms n]\n\n\
+         With no arguments, start the device home page at http://127.0.0.1:8480.\n\
+         Choose a discovered device or connect by IP address.\n\n\
          Host may be an IPv4 address, hostname, host:port, or http://host:port.\n\
          Use [ipv6-address] or [ipv6-address]:port for IPv6 hosts; link-local IPv6 may include a scope, for example [fe80::1%eth2]."
     );
@@ -399,6 +399,10 @@ mod tests {
 
     #[test]
     fn parses_hostless_and_fixed_host_server_commands() {
+        let (host, options) = parse_serve_command(Vec::new()).expect("default launch");
+        assert_eq!(host, None);
+        assert_eq!(options.listen, "127.0.0.1:8480");
+        assert_eq!(options.timeout, Duration::from_millis(2500));
         let (host, options) =
             parse_serve_command(vec!["--listen".to_string(), "127.0.0.1:0".to_string()])
                 .expect("hostless server command");

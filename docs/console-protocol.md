@@ -31,8 +31,9 @@ No-op writes are removed. Unknown controls, missing inventory members, duplicate
 controls, malformed values and stale prior values fail before the first write.
 The server reports acknowledged count on partial failure and never retries.
 The browser follows routing/mixing batches with a fresh snapshot and reconciles
-applied routes, leaving unsuccessful drafts for review. Monitor-only batches
-instead use the persistent session and return verified readback, as below.
+applied routes, leaving unsuccessful drafts for review. All batches use the
+persistent session and verify server readback before returning success; the
+response includes acknowledged count and the current monitor snapshot.
 
 ## State refresh and meter continuity
 
@@ -46,7 +47,7 @@ counter. Both complete inventories contained the same 9,307 record keys.
 The worker serves console, line-input and output refreshes over that connection.
 It continues the incremental re-arm chain between meter requests and also
 starts an independent full inventory read after 500 ms since the last completed
-inventory. Explicit HTTP refreshes and monitor pre-write/readback checks always
+inventory. Explicit HTTP refreshes and every slider/console pre-write/readback check always
 read the inventory afresh. Full reads interleave meters after 20 ms of page
 collection, retain bounds, and commit only a complete inventory. Events newer
 than a property's inventory page are overlaid before that commit.
@@ -56,8 +57,37 @@ sequence. Matching events against the outstanding state sequence are applied
 even when they arrive between meter pages or during a write acknowledgement.
 Reads retain the 256-page bound and one total deadline covering queue time and
 page collection. A failed read reconnects and reloads the full inventory
-without closing the SSE feed. Routing/mixing and older vendor writes retain
-their fresh-session lifecycle; monitor-only writes reuse the live connection.
+without closing the SSE feed. All sliders and console batches reuse the live
+connection, including routing, mixer/aux/Reverb levels, pan, masters and monitor
+controls. Legacy diagnostic presets and Line Input polarity retain their separate
+session lifecycle. The server caches the target identity for each worker after
+initial resolution, so repeated slider requests need no extra identity HTTP
+connection; allowed-host and origin/token checks still precede writes.
+
+Continuous output dragging exposed repeated timeouts in the older trim path,
+which stopped the meter worker, opened a separate session, and retried setup
+and the setter once. `/api/outputs/line-trim` and
+`/api/outputs/headphone-trim` now enqueue onto the same worker as monitor writes.
+Each request independently reads the inventory, resolves the advertised output
+indices, skips no-ops, sends one `...:03` payload, and independently reads back
+all selected bytes before reporting success. A headphone pair stays in one
+payload. Queue time, inventory, acknowledgement and readback share one deadline;
+expired work sends no setter and failed/uncertain setters are not retried.
+Connection recovery only reopens for subsequent reads or new explicit requests.
+Synthetic TCP tests cover repeated output updates on one connection, stereo
+pairs with sparse indices, meter/ACK continuity, no-ops, expiry, rejection, lost
+acknowledgements and readback mismatch. Server route tests require the existing
+worker to remain alive and propagate verification failures. Hardware write
+latency and concurrent-controller behavior still require controlled validation.
+
+The all-slider regression alternates Mic/Line gains, physical line/headphone
+trims, Main/aux/Reverb send levels and pans, stereo bus masters and monitor
+level: 28 setters on one accepted TCP connection with a continuous request
+sequence and state ACK chain. Each verified update is interleaved with meters.
+Input/console tests also cover gain ranges, sparse or missing channels, no-ops,
+expiry, rejected setters, lost acknowledgements and mismatched readback without
+retry. HTTP route tests run without any device HTTP listener to ensure an
+existing worker's identity and write queue are reused.
 
 The earlier 2026-09-10 release verification completed 20 inventory GETs in 42.1
 seconds while a single SSE connection delivered 702 meter updates. All reads
@@ -346,3 +376,29 @@ A controlled listening session should validate new writes and concurrent
 external-controller changes. Polling remains the recovery mechanism. No
 standard notification registration, preset commands, DSP-effect
 controls, AVB stream connection management, or link editing is added here.
+
+## Input gain sliders
+
+The installed-client `PendingChange<kPreampGain>` RTTI at file offset
+`0x10be7c0` leads to the constructor at VA `0x1404f1eb0`, which embeds property
+`0x1389`. The serializer at VA `0x1405ecba0` emits `13:89`, the channel index,
+size `01`, and one gain byte. The named Mic gain IO model uses
+`InputTrimConverter`. `PendingChange<kLineInGain>` at file offset `0x10ecf30`
+and its constructor at VA `0x1404f2a30` identify `0x13b2`; its IO model uses the
+same converter. These are input gains, distinct from output attenuation.
+
+A read-only comparison on 2026-09-12 through the running persistent session
+found Mic `1389` indices 0–3 = `[45,45,0,0]` and Line `13b2` indices 0–7 =
+`[20,20,0,0,0,0,0,0]`. Both arrays exactly matched their HTTP input banks;
+HTTP advertised Mic `0:74` and Line `0:20` ranges. `/api/console` exposes these
+mapped records for read-only inspection.
+
+`POST /api/inputs/gain` accepts the existing token and allowed host, `bank=mic`
+or `bank=line`, `input=<advertised channel index>`, and integer `gain_db` within
+that bank's range. The worker validates the fresh one-byte inventory, sends
+one `...:03` record only when necessary, and verifies the requested byte with
+an independent inventory read. It shares the meter connection and one total
+deadline with other slider work. No setter is retried automatically. HTTP
+polling remains for input recovery and non-gain input controls keep their raw
+`json={...}` datastore transport. Automated verification uses simulated peers;
+the exact gain setters have not been exercised against live audio hardware.

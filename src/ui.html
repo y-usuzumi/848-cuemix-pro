@@ -260,60 +260,45 @@
       .tab { flex: 1 0 auto; padding-inline: 12px; }
     }
     __CONSOLE_CSS__
+    __CONSOLE_SHELL_CSS__
   </style>
 </head>
-<body>
-  <header>
-    <div>
-      <h1>cuemix-848</h1>
-      <div class="sub">Linux control surface for MOTU 848 / CueMix Pro</div>
+<body class="app-shell">
+  <header class="app-header">
+    <div class="app-brand" aria-label="CueMix 848 control console">
+      <span class="brand-mark">848</span><div class="brand-name">CueMix<span class="brand-caption">CONTROL CONSOLE</span></div>
     </div>
     <div class="header-controls">
+      __DEVICE_HOME_LINK__
+      <label class="device-host">MOTU device<input id="host" value="__DEFAULT_HOST__" readonly spellcheck="false"></label>
       <label class="theme-control">Theme<select id="theme" aria-label="Color theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
-      <label class="device-host">Device host<input id="host" value="__DEFAULT_HOST__" readonly spellcheck="false"></label>
     </div>
   </header>
-  <main>
-    <nav class="tabs" role="tablist" aria-label="Control views">
-      <button id="tab-inputs" class="tab" type="button" role="tab" aria-selected="true" aria-controls="panel-inputs" tabindex="0" data-tab="inputs">Inputs</button>
-      <button id="tab-outputs" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-outputs" tabindex="-1" data-tab="outputs">Outputs</button>
-      <button id="tab-patchbay" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-patchbay" tabindex="-1" data-tab="patchbay">Patchbay</button>
-      <button id="tab-routing" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-routing" tabindex="-1" data-tab="routing">Routing</button>
-      <button id="tab-mixer" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-mixer" tabindex="-1" data-tab="mixer">Mixing</button>
-      <button id="tab-aux" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-aux" tabindex="-1" data-tab="aux">Aux Mixing</button>
-      <button id="tab-diagnostics" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-diagnostics" tabindex="-1" data-tab="diagnostics">Diagnostics</button>
+    <nav class="workspace-nav" aria-label="Workspaces">
+      <button id="tab-inputs" type="button" aria-current="page" aria-controls="panel-inputs" data-tab="inputs"><span class="nav-symbol" aria-hidden="true">≋</span>Inputs</button>
+      <button id="tab-outputs" type="button" aria-controls="panel-outputs" data-tab="outputs"><span class="nav-symbol" aria-hidden="true">◫</span>Outputs</button>
+      <button id="tab-mixer" type="button" aria-controls="panel-mixer" data-tab="mixer"><span class="nav-symbol" aria-hidden="true">☷</span>Mixing</button>
+      <button id="tab-patchbay" type="button" aria-controls="panel-patchbay" data-tab="patchbay"><span class="nav-symbol" aria-hidden="true">↳</span>Connections<span id="routeCount" class="route-count" hidden></span></button>
+      <button id="tab-diagnostics" type="button" aria-controls="panel-diagnostics" data-tab="diagnostics"><span class="nav-symbol" aria-hidden="true">⌁</span>Diagnostics</button>
     </nav>
-    <section id="panel-inputs" class="preamp tab-panel" role="tabpanel" aria-labelledby="tab-inputs" tabindex="0">
-      <div class="row">
-        <h2 style="flex: 1">Mic Preamps</h2>
-        <button id="loadInputs" class="secondary">Refresh All</button>
-      </div>
-      <div id="preampOut" class="preamp-grid"><div class="empty">Loading...</div></div>
-      <div class="line-inputs">
-        <h2>Line Inputs</h2>
-        <div id="lineInputOut" class="line-input-grid"><div class="empty">Loading...</div></div>
-        <p class="line-input-note">Line-input gain and polarity are discovered from the device. Close CueMix Pro before changing them here.</p>
-      </div>
+  <main class="app-body">
+    <div id="workspace" class="workspace">
+      <div id="mixModes" class="workspace-modes" aria-label="Mixing view" hidden><button type="button" data-view-link="mixer" aria-pressed="true">By mix bus</button><button id="tab-aux" type="button" data-tab="aux" aria-controls="panel-aux" aria-pressed="false">Aux sends</button></div>
+      <div id="connectionModes" class="workspace-modes" aria-label="Connection view" hidden><button type="button" data-view-link="patchbay" aria-pressed="true">Patchbay</button><button id="tab-routing" type="button" data-tab="routing" aria-controls="panel-routing" aria-pressed="false">Matrix</button></div>
+      <div class="workspace-content">
+    <section id="panel-inputs" class="preamp tab-panel" role="region" aria-labelledby="tab-inputs">
+      <div class="workspace-heading"><div><div class="eyebrow">HARDWARE</div><h2>Inputs</h2></div><div class="segmented" aria-label="Input bank"><button type="button" data-input-bank="mic" aria-pressed="true">Mic / Inst 1–4</button><button type="button" data-input-bank="line" aria-pressed="false">Line 5–12</button></div></div>
+      <div id="micBank" class="bank-workspace"><div class="bank-toolbar"><h3>Mic Preamps</h3><div class="bank-controls"><div id="preampOutPages" class="bank-pages"></div><button id="loadInputs" class="secondary" aria-label="Refresh all inputs">Refresh</button></div></div><div id="preampOut" class="preamp-grid hardware-strips"><div class="empty">Loading preamps…</div></div></div>
+      <div id="lineBank" class="bank-workspace" hidden><div class="bank-toolbar"><h3>Line Inputs · gain &amp; polarity</h3><div id="lineInputOutPages" class="bank-pages"></div></div><div id="lineInputOut" class="line-input-grid hardware-strips"><div class="empty">Loading line inputs…</div></div></div>
+      <p class="workspace-note">Click a channel name to rename. Use one active controller when changing levels.</p>
     </section>
-    <section id="panel-outputs" class="outputs tab-panel" role="tabpanel" aria-labelledby="tab-outputs" tabindex="0" hidden>
-      <div class="monitor-panel console-panel" role="region" aria-labelledby="monitorTitle">
-        <div class="row"><h2 id="monitorTitle" style="flex:1">Monitoring</h2><button class="secondary console-refresh">Refresh monitoring</button></div>
-        <p class="console-status" role="status" aria-live="polite">Reading monitoring settings…</p>
-        <div id="monitorControls"><p class="empty">Loading monitoring settings…</p></div>
-      </div>
-      <div class="row">
-        <h2 style="flex: 1">Line Output Gains</h2>
-        <button id="loadOutputs" class="secondary">Refresh All</button>
-      </div>
-      <div id="outputOut" class="output-grid"><div class="empty">Loading...</div></div>
-      <div class="phone-outputs">
-        <h2>Phones</h2>
-        <div id="phoneOut" class="phone-grid"><div class="empty">Loading...</div></div>
-        <p class="phone-note">Outputs and stereo channel pairs are discovered from the device. Close CueMix Pro before changing gain here.</p>
-      </div>
+    <section id="panel-outputs" class="outputs tab-panel console-panel" role="region" aria-labelledby="tab-outputs" hidden>
+      <div class="workspace-heading"><div><div class="eyebrow">HARDWARE</div><h2>Outputs</h2></div><div class="segmented" aria-label="Output bank"><button type="button" data-output-bank="line" aria-pressed="true">Line 1–12</button><button id="focusPhones" type="button" aria-controls="headphonePanel" title="Jump to headphone controls">Show phones ↗</button><button type="button" data-output-bank="setup" aria-pressed="false">Monitor setup</button></div></div>
+      <div id="outputLineBank" class="bank-workspace"><div class="bank-toolbar"><h3>Line Output Gains</h3><div class="bank-controls"><div id="outputOutPages" class="bank-pages"></div><button id="loadOutputs" class="secondary" aria-label="Refresh all outputs">Refresh</button></div></div><div id="outputOut" class="output-grid hardware-strips"><div class="empty">Loading outputs…</div></div><p class="workspace-note">Output trims set relative levels. The monitor knob controls the shared listening level.</p></div>
+      <div id="outputSetupBank" class="bank-workspace" hidden><div id="monitorSetupControls"><p class="empty">Loading monitor connections…</p></div></div>
     </section>
     __CONSOLE_PANELS__
-    <section id="panel-diagnostics" class="diagnostics tab-panel" role="tabpanel" aria-labelledby="tab-diagnostics" tabindex="0" hidden>
+    <section id="panel-diagnostics" class="diagnostics tab-panel" role="region" aria-labelledby="tab-diagnostics" hidden>
 <details id="legacyMixer"><summary>Legacy fader diagnostics and meter tools</summary>
       <div class="row">
         <h2 style="flex: 1">Validated Mixer Faders</h2>
@@ -374,7 +359,23 @@
         </section>
       </div>
     </section>
+      </div>
+      <aside id="consoleDraftTray" class="console-draft-tray" aria-label="Staged routing changes" hidden>
+        <div class="console-heading"><div><strong id="draftCount">No staged changes</strong><p id="draftHint">Your hardware changes only when you apply.</p></div><div class="console-toolbar"><button id="discardRoutes" class="secondary">Discard</button><button id="applyRoutes">Apply connections</button></div></div>
+        <details id="draftDetails"><summary>Review connections</summary><div id="draftList"></div></details>
+      </aside>
+    </div>
+    <aside class="monitor-rail console-panel" aria-label="Monitor controls">
+      <div class="rail-heading"><h2 id="monitorTitle">Monitor</h2><button id="openMonitorSetup" type="button" aria-label="Open monitor setup">Setup ↗</button></div>
+      <div id="monitorControls"><p class="empty">Reading monitor settings…</p></div>
+      <div id="headphonePanel" class="phone-outputs" role="region" aria-labelledby="headphoneTitle"><h2 id="headphoneTitle" tabindex="-1">Headphones</h2><div id="phoneOut" class="phone-grid"><div class="empty">Reading headphone levels…</div></div></div>
+      <p class="rail-note">Talk uses the talkback source and destinations set in CueMix Pro.</p>
+    </aside>
   </main>
+  <footer class="app-footer"><div class="console-status" role="status" aria-live="polite">Connecting to device…</div><span class="footer-brand">C U E M I X / 848</span></footer>
+  <script>__LAYOUT_JS__</script>
+  <script>__SLIDER_QUEUE_JS__</script>
+  <script>__DB_ENTRY_JS__</script>
   <script>
     const $ = (id) => document.getElementById(id);
     const qs = (params) => new URLSearchParams(params).toString();
@@ -424,15 +425,47 @@
     let outputRefreshInFlight = false;
     let outputWritePending = false;
     let headphoneWritePending = false;
-    const tabs = Array.from(document.querySelectorAll('[role="tab"][data-tab]'));
+    let outputCommitPending = false;
+    const hardwareSliders = CueMixSliders.createQueue({
+      ready: () => !globalThis.consoleUi?.busy() && !outputRefreshInFlight &&
+        !lineInputRefreshInFlight && !lineInputPhaseWritePending && !pendingWrites.size,
+      async send({ host, save, value }) {
+        if (host !== $('host').value) return;
+        await save(value, host);
+      },
+      onError({ status }, error) {
+        setStripStatus(status, `Save stopped: ${error.message}`, 'error');
+      },
+      onIdle() {
+        if (outputCommitPending) { outputCommitPending = false; loadOutputs({ quiet: true }); }
+      }
+    });
+    function bindHardwareSlider(input, key, status, save, output = false) {
+      const begin = event => { if (!event.repeat) hardwareSliders.begin(key); };
+      input.addEventListener('pointerdown', begin);
+      input.addEventListener('keydown', begin);
+      const queue = final => {
+        if (final && output) outputCommitPending = true;
+        hardwareSliders.enqueue(key, input.value, { host: $('host').value, save, value: input.value, status }, final);
+      };
+      input.addEventListener('input', () => queue(false));
+      input.addEventListener('change', () => queue(true));
+      input.addEventListener('dbcommit', () => {
+        hardwareSliders.begin(key);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        queue(true);
+      });
+    }
+    const tabs = Array.from(document.querySelectorAll('[data-tab]'));
+    let activeView = 'inputs';
     function activateTab(tabName, { updateHash = true, focusTab = false } = {}) {
       const activeTab = tabs.find(tab => tab.dataset.tab === tabName) || tabs[0];
+      activeView = activeTab.dataset.tab;
       tabs.forEach(tab => {
         const selected = tab === activeTab;
-        tab.setAttribute('aria-selected', String(selected));
-        tab.tabIndex = selected ? 0 : -1;
         $(tab.getAttribute('aria-controls')).hidden = !selected;
       });
+      CueMixLayout.activate(activeView);
       if (updateHash) history.replaceState(null, '', `#${activeTab.dataset.tab}`);
       if (focusTab) activeTab.focus();
       if (activeTab.dataset.tab === 'mixer') {
@@ -444,15 +477,16 @@
       if (activeTab.dataset.tab === 'outputs') loadOutputs({ quiet: outputCount > 0 || headphoneCount > 0 });
     }
     function handleTabKeydown(event) {
-      const currentIndex = tabs.indexOf(event.currentTarget);
+      const visibleTabs = tabs.filter(tab => tab.getClientRects().length);
+      const currentIndex = visibleTabs.indexOf(event.currentTarget);
       let nextIndex;
-      if (event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
-      if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % tabs.length;
+      if (event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + visibleTabs.length) % visibleTabs.length;
+      if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % visibleTabs.length;
       if (event.key === 'Home') nextIndex = 0;
-      if (event.key === 'End') nextIndex = tabs.length - 1;
+      if (event.key === 'End') nextIndex = visibleTabs.length - 1;
       if (nextIndex === undefined) return;
       event.preventDefault();
-      activateTab(tabs[nextIndex].dataset.tab, { focusTab: true });
+      activateTab(visibleTabs[nextIndex].dataset.tab, { focusTab: true });
     }
     const show = (value) => {
       $('response').textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
@@ -506,6 +540,7 @@
         }
       } finally {
         preampRefreshInFlight = false;
+        CueMixLayout.hardware();
       }
     }
     function syncPreamp(index, data) {
@@ -540,10 +575,10 @@
       const input = $(`mic-${index}-gain`);
       if (!input || !canSyncField(input, path)) return;
       input.value = value;
-      $(`mic-${index}-gain-value`).textContent = `${input.value} dB`;
+      CueMixDb.sync($(`mic-${index}-gain-value`), `${input.value} dB`);
     }
     function canSyncField(input, path) {
-      return !pendingWrites.has(path) && document.activeElement !== input && !input.matches(':active');
+      return !pendingWrites.has(path) && !hardwareSliders.has(path) && document.activeElement !== input && !input.matches(':active') && !CueMixDb.editing(input);
     }
     function channelDisplayLabel(value, fallback) {
       const label = String(value ?? '');
@@ -563,7 +598,7 @@
           <input id="mic-${index}-name" class="channel-name-editor" value="${escapeHtml(name)}" placeholder="Mic / Inst ${index + 1}" aria-label="Channel name" spellcheck="false" hidden>
         </div>
         <div class="strip-channel-body">
-          <label class="gain-control"><span class="control-kicker">Gain</span><output class="gain-value" id="mic-${index}-gain-value">${gain} dB</output><input id="mic-${index}-gain" class="gain-fader" type="range" orient="vertical" min="${min}" max="${max}" step="1" value="${gain}"></label>
+          <div class="gain-control"><span class="control-kicker">Gain</span><input class="gain-value db-input" id="mic-${index}-gain-value" data-db-for="mic-${index}-gain" type="text" inputmode="decimal" value="${gain} dB" aria-label="Mic / Inst ${index + 1} gain in decibels" title="Type a level. Enter to apply; Escape to cancel."><input id="mic-${index}-gain" class="gain-fader" type="range" orient="vertical" min="${min}" max="${max}" step="1" value="${gain}" aria-label="Mic / Inst ${index + 1} gain"></div>
           <div class="meter-control"><span class="control-kicker">Level</span><div class="channel-meter" aria-label="${escapeHtml(label)} signal meter">${meterLaneMarkup(`mic-${index}-meter`)}${meterScaleMarkup()}</div></div>
         </div>
         <div class="switches">
@@ -587,12 +622,10 @@
       const gain = $(`mic-${index}-gain`);
       const gainValue = $(`mic-${index}-gain-value`);
       const status = $(`mic-${index}-status`);
-      const saveGain = debounce((value) => writeDatastore(path('trim'), value, status), 180);
       gain.addEventListener('input', () => {
-        gainValue.textContent = `${gain.value} dB`;
-        saveGain(gain.value);
+        CueMixDb.sync(gainValue, `${gain.value} dB`);
       });
-      gain.addEventListener('change', () => saveGain.flush(gain.value));
+      bindHardwareSlider(gain, path('trim'), status, (value, host) => writeInputGain('mic', index, value, status, host));
       bindPreampNameEditor(index, path('name'), status);
       for (const field of ['48V', 'pad', 'phase']) {
         $(`mic-${index}-${field}`).addEventListener('change', (event) => writeDatastore(path(field), event.target.checked ? '1' : '0', status));
@@ -685,6 +718,8 @@
         lineInputRefreshInFlight = false;
         if (!lineInputPhaseWritePending) setLineInputPhaseControlsDisabled(false);
         loadLineInputGains({ quiet: true });
+        CueMixLayout.hardware();
+        loadOutputs({ quiet: true });
       }
     }
     async function loadLineInputGains({ quiet = false } = {}) {
@@ -716,7 +751,7 @@
           <input id="line-in-${index}-name" class="channel-name-editor" value="" placeholder="Line In ${number}" aria-label="Channel name" spellcheck="false" hidden>
         </div>
         <div class="strip-channel-body">
-          <label class="gain-control"><span class="control-kicker">Gain</span><output class="gain-value" id="line-in-${index}-gain-value">${gain} dB</output><input id="line-in-${index}-gain" class="gain-fader" type="range" orient="vertical" min="0" max="20" step="1" value="${gain}"></label>
+          <div class="gain-control"><span class="control-kicker">Gain</span><input class="gain-value db-input" id="line-in-${index}-gain-value" data-db-for="line-in-${index}-gain" type="text" inputmode="decimal" value="${gain} dB" aria-label="Line In ${number} gain in decibels" title="Type a level. Enter to apply; Escape to cancel."><input id="line-in-${index}-gain" class="gain-fader" type="range" orient="vertical" min="0" max="20" step="1" value="${gain}" aria-label="Line In ${number} gain"></div>
           <div class="meter-control"><span class="control-kicker">Level</span><div class="channel-meter" aria-label="Line In ${number} signal meter">${meterLaneMarkup(`line-in-${index}-meter`)}${meterScaleMarkup()}</div></div>
         </div>
         <div class="switches line-input-switches">
@@ -728,13 +763,12 @@
     function bindLineInput(index) {
       const gain = $(`line-in-${index}-gain`);
       const status = $(`line-in-${index}-status`);
-      const saveGain = debounce((value) => writeDatastore(lineInputFieldPath(index, 'trim'), value, status), 180);
       gain.addEventListener('input', () => {
-        $(`line-in-${index}-gain-value`).textContent = `${gain.value} dB`;
-        saveGain(gain.value);
+        CueMixDb.sync($(`line-in-${index}-gain-value`), `${gain.value} dB`);
       });
-      gain.addEventListener('change', () => saveGain.flush(gain.value));
+      const trimPath = lineInputFieldPath(index, 'trim');
       const channel = lineInputChannels[index] ?? index;
+      bindHardwareSlider(gain, trimPath, status, (value, host) => writeInputGain('line', channel, value, status, host));
       bindChannelNameEditor({
         buttonId: `line-in-${index}-label`,
         editorId: `line-in-${index}-name`,
@@ -754,7 +788,7 @@
       const gain = $(`line-in-${index}-gain`);
       if (!gain || !canSyncField(gain, path)) return;
       gain.value = value;
-      $(`line-in-${index}-gain-value`).textContent = `${gain.value} dB`;
+      CueMixDb.sync($(`line-in-${index}-gain-value`), `${gain.value} dB`);
     }
     function syncLineInputLabel(index, value) {
       const channel = lineInputChannels[index] ?? index;
@@ -797,7 +831,7 @@
       }
     }
     async function loadOutputs({ quiet = false } = {}) {
-      if (globalThis.consoleUi?.busy()) return;
+      if (globalThis.consoleUi?.busy() || hardwareSliders.busy()) return;
       if (outputRefreshInFlight || outputWritePending || headphoneWritePending || lineInputRefreshInFlight || lineInputPhaseWritePending) return;
       outputRefreshInFlight = true;
       const monitorRevision = globalThis.consoleUi?.outputRevision();
@@ -806,6 +840,7 @@
       if (!quiet && !headphoneCount) $('phoneOut').innerHTML = '<div class="empty">Loading...</div>';
       try {
         const json = await fetchJson('/api/outputs?' + qs({ host: $('host').value }));
+        if (outputHost !== $('host').value) return;
         globalThis.consoleUi?.outputs(json.console, outputHost, monitorRevision, json.monitor);
         try {
           const labelResponse = await fetchJson('/api/get?' + qs({ host: $('host').value, path: lineOutputPath }));
@@ -856,6 +891,7 @@
         show({ error: err.message });
       } finally {
         outputRefreshInFlight = false;
+        CueMixLayout.hardware();
       }
     }
     function outputMarkup(index, output, labelData) {
@@ -870,7 +906,7 @@
           <input id="out-${index}-name" class="channel-name-editor" value="${escapeHtml(nameValue)}" placeholder="${escapeHtml(fallback)}" aria-label="Channel name" spellcheck="false" hidden>
         </div>
         <div class="strip-channel-body">
-          <label class="gain-control"><span class="control-kicker">Gain</span><output class="gain-value" id="out-${index}-gain-value">${label}</output><input id="out-${index}-gain" class="gain-fader" type="range" orient="vertical" min="-100" max="0" step="1" value="${gain}" aria-valuetext="${label}"></label>
+          <div class="gain-control"><span class="control-kicker">Gain</span><input class="gain-value db-input" id="out-${index}-gain-value" data-db-for="out-${index}-gain" data-db-infinity="-100" type="text" inputmode="decimal" value="${label}" aria-label="${escapeHtml(name)} gain in decibels" title="Type a level or -inf. Enter to apply; Escape to cancel."><input id="out-${index}-gain" class="gain-fader" type="range" orient="vertical" min="-100" max="0" step="1" value="${gain}" aria-valuetext="${label}" aria-label="${escapeHtml(name)} gain"></div>
           <div class="meter-control"><span class="control-kicker">Level</span><div class="channel-meter" aria-label="${escapeHtml(name)} signal meter">${meterLaneMarkup(`out-${index}-meter`)}${meterScaleMarkup()}</div></div>
         </div>
         <div class="strip-status" id="out-${index}-status" aria-live="polite"></div>
@@ -882,10 +918,10 @@
       const status = $(`out-${index}-status`);
       gain.addEventListener('input', () => {
         const label = outputGainLabel(gain.value);
-        gainValue.textContent = label;
+        CueMixDb.sync(gainValue, label);
         gain.setAttribute('aria-valuetext', label);
       });
-      gain.addEventListener('change', () => writeLineOutputTrim(index, gain.value, status));
+      bindHardwareSlider(gain, gain.id, status, (value, host) => writeLineOutputTrim(index, value, status, host), true);
       bindChannelNameEditor({
         buttonId: `out-${index}-label`,
         editorId: `out-${index}-name`,
@@ -905,12 +941,12 @@
         fallback: lineOutputFallback(index, output)
       });
       const input = $(`out-${index}-gain`);
-      if (!input || document.activeElement === input || input.matches(':active')) return;
+      if (!input || hardwareSliders.has(input.id) || document.activeElement === input || input.matches(':active') || CueMixDb.editing(input)) return;
       const gain = outputSliderValue(output.attenuation);
       const label = outputGainLabel(gain);
       input.value = gain;
       input.setAttribute('aria-valuetext', label);
-      $(`out-${index}-gain-value`).textContent = label;
+      CueMixDb.sync($(`out-${index}-gain-value`), label);
     }
     function lineOutputChannel(index, output) {
       return Number(output.channel_index ?? index);
@@ -925,27 +961,23 @@
     function lineOutputFieldPath(index, output, field) {
       return `${lineOutputPath}/ch/${lineOutputChannel(index, output)}/${field}`;
     }
-    async function writeLineOutputTrim(index, trimDb, status) {
-      if (globalThis.consoleUi?.busy()) { setStripStatus(status, 'Wait for monitoring to finish saving', 'pending'); return; }
-      if (outputWritePending || headphoneWritePending || lineInputRefreshInFlight || lineInputPhaseWritePending) return;
+    async function writeLineOutputTrim(index, trimDb, status, host) {
       outputWritePending = true;
       setStripStatus(status, 'Saving...', 'pending');
-      document.querySelectorAll('[id^="out-"][id$="-gain"]').forEach(input => { input.disabled = true; });
       try {
         const json = await fetchJson('/api/outputs/line-trim', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: qs({ host: $('host').value, output: index, trim_db: Number(trimDb) === -100 ? '-inf' : trimDb, token: sessionToken })
+          body: qs({ host, output: index, trim_db: Number(trimDb) === -100 ? '-inf' : trimDb, token: sessionToken })
         });
         setStripStatus(status, 'Saved', 'saved');
         show(json.body ?? json);
       } catch (err) {
         setStripStatus(status, 'Save failed', 'error');
         show({ error: err.message });
+        throw err;
       } finally {
         outputWritePending = false;
-        document.querySelectorAll('[id^="out-"][id$="-gain"]').forEach(input => { input.disabled = false; });
-        loadOutputs({ quiet: true });
       }
     }
     function headphoneMarkup(index, output) {
@@ -953,14 +985,14 @@
       const right = headphoneSliderValue(output, 1);
       const label = headphonePairLabel(left, right);
       return `<article class="strip">
-        <div class="strip-head"><strong>Phones ${index + 1}</strong></div>
-        <div class="strip-channel-body">
-          <label class="gain-control"><span class="control-kicker">Gain</span><output class="gain-value" id="phone-${index}-gain-value">${label}</output><input id="phone-${index}-gain" class="gain-fader" type="range" orient="vertical" min="-100" max="0" step="1" value="${left}" aria-valuetext="${outputGainLabel(left)}"></label>
-          <div class="meter-control"><span class="control-kicker">Level</span><div class="channel-meter stereo-channel-meter" aria-label="Phones ${index + 1} stereo signal meter">
+        <div class="phone-title"><strong>Phones ${index + 1}</strong><input class="gain-value db-input" id="phone-${index}-gain-value" data-db-for="phone-${index}-gain" data-db-infinity="-100" data-db-mixed="${left !== right}" type="text" inputmode="decimal" value="${label}" aria-label="Phones ${index + 1} level in decibels" title="${label}. Type a level for both channels, or -inf. Enter to apply; Escape to cancel."></div>
+        <div class="phone-control">
+          <input id="phone-${index}-gain" class="phone-fader gain-fader" type="range" orient="vertical" min="-100" max="0" step="1" value="${left}" aria-label="Phones ${index + 1} level" aria-valuetext="${outputGainLabel(left)}">
+          <div class="phone-meter" aria-label="Phones ${index + 1} stereo signal meter">
             <span class="vertical-meter-column">${meterLaneMarkup(`phone-${index}-meter-l`)}<span class="vertical-meter-label">L</span></span>
             <span class="vertical-meter-column">${meterLaneMarkup(`phone-${index}-meter-r`)}<span class="vertical-meter-label">R</span></span>
             ${meterScaleMarkup()}
-          </div></div>
+          </div>
         </div>
         <div class="strip-status" id="phone-${index}-status" aria-live="polite"></div>
       </article>`;
@@ -983,69 +1015,58 @@
       const gainValue = $(`phone-${index}-gain-value`);
       gain.addEventListener('input', () => {
         const label = outputGainLabel(gain.value);
-        gainValue.textContent = label;
+        CueMixDb.sync(gainValue, label);
         gain.setAttribute('aria-valuetext', label);
       });
-      gain.addEventListener('change', () => writeHeadphoneTrim(index, gain.value, $(`phone-${index}-status`)));
+      const status = $(`phone-${index}-status`);
+      bindHardwareSlider(gain, gain.id, status, (value, host) => writeHeadphoneTrim(index, value, status, host), true);
     }
     function syncHeadphone(index, output) {
       const input = $(`phone-${index}-gain`);
-      if (!input || document.activeElement === input || input.matches(':active')) return;
+      if (!input || hardwareSliders.has(input.id) || document.activeElement === input || input.matches(':active') || CueMixDb.editing(input)) return;
       const left = headphoneSliderValue(output, 0);
       const right = headphoneSliderValue(output, 1);
       input.value = left;
       input.setAttribute('aria-valuetext', outputGainLabel(left));
-      $(`phone-${index}-gain-value`).textContent = headphonePairLabel(left, right);
+      const entry = $(`phone-${index}-gain-value`);
+      entry.dataset.dbMixed = String(left !== right);
+      entry.title = `${headphonePairLabel(left, right)}. Type a level for both channels, or -inf. Enter to apply; Escape to cancel.`;
+      CueMixDb.sync(entry, headphonePairLabel(left, right));
     }
-    async function writeHeadphoneTrim(index, trimDb, status) {
-      if (globalThis.consoleUi?.busy()) { setStripStatus(status, 'Wait for monitoring to finish saving', 'pending'); return; }
-      if (headphoneWritePending || outputWritePending || lineInputRefreshInFlight || lineInputPhaseWritePending) return;
+    async function writeHeadphoneTrim(index, trimDb, status, host) {
       headphoneWritePending = true;
       setStripStatus(status, 'Saving...', 'pending');
-      document.querySelectorAll('[id^="phone-"][id$="-gain"]').forEach(input => { input.disabled = true; });
       try {
         const json = await fetchJson('/api/outputs/headphone-trim', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: qs({ host: $('host').value, output: index, trim_db: Number(trimDb) === -100 ? '-inf' : trimDb, token: sessionToken })
+          body: qs({ host, output: index, trim_db: Number(trimDb) === -100 ? '-inf' : trimDb, token: sessionToken })
         });
         setStripStatus(status, 'Saved', 'saved');
         show(json.body ?? json);
       } catch (err) {
         setStripStatus(status, 'Save failed', 'error');
         show({ error: err.message });
+        throw err;
       } finally {
         headphoneWritePending = false;
-        document.querySelectorAll('[id^="phone-"][id$="-gain"]').forEach(input => { input.disabled = false; });
-        loadOutputs({ quiet: true });
       }
-    }
-    function debounce(callback, delay) {
-      let timer = null;
-      let pendingArgs;
-      const invoke = () => {
-        timer = null;
-        const args = pendingArgs;
-        pendingArgs = undefined;
-        callback(...args);
-      };
-      const schedule = (...args) => {
-        pendingArgs = args;
-        clearTimeout(timer);
-        timer = setTimeout(invoke, delay);
-      };
-      schedule.flush = (...args) => {
-        if (timer === null) return;
-        pendingArgs = args;
-        clearTimeout(timer);
-        invoke();
-      };
-      return schedule;
     }
     function setStripStatus(element, message, state) {
       if (!element) return;
       element.textContent = message;
       element.className = `strip-status ${state || ''}`;
+    }
+    async function writeInputGain(bank, input, gainDb, status, host) {
+      setStripStatus(status, 'Saving...', 'pending');
+      const json = await fetchJson('/api/inputs/gain', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: qs({ host, bank, input, gain_db: gainDb, token: sessionToken })
+      });
+      if (json.status >= 400) throw new Error(`Device returned HTTP ${json.status}`);
+      setStripStatus(status, 'Saved', 'saved');
+      show(json.body ?? json);
     }
     async function writeDatastore(path, value, status) {
       setStripStatus(status, 'Saving...', 'pending');
@@ -1329,8 +1350,9 @@
       meterEventHost = '';
     }
     function loadMeters() {
-      const activeMeterTab = ['inputs', 'outputs', 'mixer', 'aux', 'diagnostics'].some(tab => $(`tab-${tab}`).getAttribute('aria-selected') === 'true');
-      if (document.hidden || !activeMeterTab) {
+      // The monitor rail needs live state in Connections as well as in the
+      // channel views. One shared stream serves every visible workspace.
+      if (document.hidden) {
         stopMeterStream();
         return;
       }
@@ -1424,6 +1446,7 @@
     });
     window.addEventListener('hashchange', () => activateTab(window.location.hash.slice(1), { updateHash: false }));
     $('host').addEventListener('change', () => {
+      hardwareSliders.reset(); outputCommitPending = false;
       preampCount = 0;
       lineInputCount = 0;
       lineInputChannels = [];
@@ -1434,15 +1457,19 @@
       headphoneMeterPaths = [];
       stopMeterStream();
       loadPreamps();
-      if ($('tab-inputs').getAttribute('aria-selected') === 'true') loadLineInputs();
-      if ($('tab-outputs').getAttribute('aria-selected') === 'true') loadOutputs();
+      if (activeView === 'inputs') loadLineInputs();
+      loadOutputs();
       loadMeters();
+    });
+    CueMixDb.mount(document, message => {
+      show({ error: message });
+      document.querySelectorAll('.console-status').forEach(node => { node.textContent = message; node.className = 'console-status error'; });
     });
     loadTheme();
     // HTTP has no verified push subscription yet, so polling remains the
     // recovery path for physical-panel input changes.
     setInterval(() => {
-      if (!document.hidden && $('tab-inputs').getAttribute('aria-selected') === 'true') {
+      if (!document.hidden && activeView === 'inputs') {
         loadPreamps({ quiet: true });
         loadLineInputGains({ quiet: true });
       }
@@ -1450,23 +1477,23 @@
     setInterval(() => {
       // Line-input polarity remains vendor-only, so refresh its bounded
       // snapshot while the Inputs tab is visible.
-      if (!document.hidden && $('tab-inputs').getAttribute('aria-selected') === 'true') loadLineInputs({ quiet: true });
+      if (!document.hidden && activeView === 'inputs') loadLineInputs({ quiet: true });
     }, 5000);
     setInterval(() => {
-      // Output trims use one bounded vendor-state snapshot for both line and
-      // headphone controls while their tab is visible.
-      if (!document.hidden && $('tab-outputs').getAttribute('aria-selected') === 'true') loadOutputs({ quiet: true });
+      // Persistent monitoring, headphone levels and console state share this
+      // recovery read in every workspace, including when meter events pause.
+      if (!document.hidden) loadOutputs({ quiet: true });
     }, 5000);
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
         stopMeterStream();
       } else {
         loadPreamps({ quiet: true });
-        if ($('tab-inputs').getAttribute('aria-selected') === 'true') {
+        if (activeView === 'inputs') {
           loadLineInputGains({ quiet: true });
           loadLineInputs({ quiet: true });
         }
-        if ($('tab-outputs').getAttribute('aria-selected') === 'true') loadOutputs({ quiet: true });
+        loadOutputs({ quiet: true });
         loadMeters();
       }
     });
@@ -1478,5 +1505,6 @@
   <script>__CONSOLE_MODEL__</script>
   <script>__MONITOR_JS__</script>
   <script>__CONSOLE_JS__</script>
+  <script>CueMixLayout.init(); setTimeout(() => loadOutputs({ quiet: true }), 500);</script>
 </body>
 </html>

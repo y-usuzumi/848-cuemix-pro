@@ -1,12 +1,10 @@
 //! CueMix routing and mixer records. See docs/console-protocol.md for the
 //! installed-client and read-only device evidence behind these mappings.
-use super::{AvdeccProxy, VendorStateRecord};
+use super::VendorStateRecord;
 use crate::device::json_escape;
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
 
 const Q24: f64 = 16_777_216.0;
-const PROTOCOL: [u8; 6] = [0, 1, 0xf2, 0, 0, 3];
 const MAX_CHANGES: usize = 32;
 
 #[derive(Clone, Debug)]
@@ -21,21 +19,6 @@ pub(crate) struct ConsoleChange {
     index: u16,
     expected: Vec<u8>,
     value: String,
-}
-
-pub(crate) fn is_monitor_changes(changes: &[ConsoleChange]) -> bool {
-    !changes.is_empty()
-        && changes.iter().all(|change| {
-            matches!(
-                change.operation.as_str(),
-                "monitor-level"
-                    | "monitor-select"
-                    | "monitor-members"
-                    | "monitor-mute"
-                    | "monitor-mono"
-                    | "monitor-talk"
-            )
-        })
 }
 
 #[derive(Debug, PartialEq)]
@@ -60,7 +43,7 @@ fn relevant(property: u16) -> bool {
         0x841a | 0x842b | 0x0420 | 0x0421 | 0x0429 |
         0x842e | 0x843f | 0x0434 | 0x0435 | 0x043c | 0x043d |
         0x0448 | 0x0449 | 0x93ac..=0x93b1 | 0x1b5b |
-        0x1388 | 0x1393 | 0x1394 | 0x139a | 0x139b | 0x13a3 | 0x13b6 | 0x93b9)
+        0x1388 | 0x1389 | 0x13b2 | 0x1393 | 0x1394 | 0x139a | 0x139b | 0x13a3 | 0x13b6 | 0x93b9)
 }
 
 impl ConsoleState {
@@ -445,58 +428,6 @@ fn unhex(value: &str) -> Result<Vec<u8>, String> {
 
 fn hex(value: &[u8]) -> String {
     value.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn open(
-    host: &str,
-    target: u64,
-    timeout: Duration,
-) -> Result<(AvdeccProxy, u64, u16, ConsoleState), String> {
-    let mut proxy = AvdeccProxy::connect(host, "/", timeout)?;
-    let controller = proxy
-        .request_entity_id([1, 0, 0, 0, 1, 0], timeout)?
-        .entity_id
-        .ok_or("no controller identity")?;
-    let (sequence, records) = proxy.start_vendor_state(target, controller, timeout)?;
-    Ok((
-        proxy,
-        controller,
-        sequence,
-        ConsoleState::from_records(records)?,
-    ))
-}
-
-pub(crate) fn write_console(
-    host: &str,
-    target: u64,
-    changes: &[ConsoleChange],
-    timeout: Duration,
-) -> Result<usize, ConsoleWriteError> {
-    let error = |message: String| ConsoleWriteError {
-        applied: 0,
-        conflict: message.starts_with("conflict:"),
-        message,
-    };
-    let (mut proxy, controller, mut sequence, state) =
-        open(host, target, timeout).map_err(error)?;
-    // Validate the ENTIRE batch against one fresh snapshot before the first setter.
-    let writes = state.prepare(changes).map_err(error)?;
-    for (applied, record) in writes.iter().enumerate() {
-        let mut payload = Vec::with_capacity(9);
-        payload.extend(record.property.to_be_bytes());
-        payload.extend(record.index.to_be_bytes());
-        payload.push(record.value.len() as u8);
-        payload.extend(&record.value);
-        let response = proxy
-            .vendor_request(target, controller, sequence, PROTOCOL, &payload, timeout)
-            .and_then(|frame| validate_ack(&frame.payload));
-        if let Err(message) = response {
-            return Err(ConsoleWriteError { applied, conflict: false,
-                message: format!("{message}; {applied} changes acknowledged. The last write outcome is unknown; refresh before retrying.") });
-        }
-        sequence = sequence.wrapping_add(1);
-    }
-    Ok(writes.len())
 }
 
 pub(super) fn validate_ack(payload: &[u8]) -> Result<(), String> {

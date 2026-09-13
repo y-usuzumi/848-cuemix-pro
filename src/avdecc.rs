@@ -28,9 +28,7 @@ mod avdecc_probe;
 
 #[path = "avdecc_console.rs"]
 mod avdecc_console;
-pub(crate) use avdecc_console::{
-    is_monitor_changes, parse_changes, write_console, ConsoleChange, ConsoleWriteError,
-};
+pub(crate) use avdecc_console::{parse_changes, ConsoleChange, ConsoleWriteError};
 
 pub(crate) use avdecc_probe::{probe, write_probe_result, DescriptorRead};
 
@@ -205,6 +203,7 @@ const HEADPHONE_TRIM_PROPERTY: u16 = 0x13b7;
 const LINE_OUTPUT_METER_PATH_PROPERTY: u16 = 0x93ac;
 const HEADPHONE_METER_PATH_PROPERTY: u16 = 0x13b4;
 const LINE_INPUT_GAIN_PROPERTY: u16 = 0x13b2;
+const PREAMP_GAIN_PROPERTY: u16 = 0x1389;
 const LINE_INPUT_PHASE_PROPERTY: u16 = 0x13b3;
 const LINE_INPUT_GAIN_MAX_DB: u8 = 20;
 
@@ -363,7 +362,7 @@ pub(crate) struct VendorSnapshotRequest {
     pub(crate) reply: mpsc::Sender<Result<VendorSnapshot, String>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct MonitorState {
     records: Vec<VendorStateRecord>,
     revision: u64,
@@ -410,16 +409,68 @@ impl MonitorState {
     }
 }
 
-pub(crate) struct MonitorWriteRequest {
+pub(crate) struct ConsoleWriteRequest {
     pub(crate) deadline: Instant,
     pub(crate) changes: Vec<ConsoleChange>,
     pub(crate) reply: mpsc::Sender<Result<(usize, MonitorState), ConsoleWriteError>>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum OutputTrimTarget {
+    Line(usize),
+    Headphones(usize),
+}
+
+pub(crate) struct OutputTrimWriteRequest {
+    pub(crate) deadline: Instant,
+    pub(crate) output: OutputTrimTarget,
+    pub(crate) trim: OutputTrim,
+    pub(crate) reply: mpsc::Sender<Result<(), String>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum InputGainTarget {
+    Preamp(u16),
+    Line(u16),
+}
+
+impl InputGainTarget {
+    fn property_and_index(self) -> (u16, u16) {
+        match self {
+            Self::Preamp(index) => (PREAMP_GAIN_PROPERTY, index),
+            Self::Line(index) => (LINE_INPUT_GAIN_PROPERTY, index),
+        }
+    }
+
+    pub(crate) fn validate(self, gain_db: u8) -> Result<(), String> {
+        let max = match self {
+            Self::Preamp(_) => 74,
+            Self::Line(_) => LINE_INPUT_GAIN_MAX_DB,
+        };
+        if gain_db > max {
+            return Err(format!("input gain must be an integer from 0 to {max} dB"));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct InputGainWriteRequest {
+    pub(crate) deadline: Instant,
+    pub(crate) input: InputGainTarget,
+    pub(crate) gain_db: u8,
+    pub(crate) reply: mpsc::Sender<Result<(), String>>,
+}
+
+pub(crate) enum SessionWriteRequest {
+    Console(ConsoleWriteRequest),
+    OutputTrim(OutputTrimWriteRequest),
+    InputGain(InputGainWriteRequest),
+}
+
 pub(crate) struct MixerMeterWorker {
     pub(crate) stop_sender: mpsc::Sender<mpsc::Sender<()>>,
     pub(crate) state_sender: mpsc::Sender<VendorSnapshotRequest>,
-    pub(crate) monitor_sender: mpsc::Sender<MonitorWriteRequest>,
+    pub(crate) write_sender: mpsc::Sender<SessionWriteRequest>,
     pub(crate) meters: Arc<MixerMeterFeed>,
 }
 
@@ -503,122 +554,6 @@ fn set_line_input_property_once(
         .get(input_index)
         .ok_or("that line input was not advertised by the device")?;
     let data = one_byte_property_payload(property_id, input.channel_index, value);
-    proxy.vendor_request(
-        target_entity_id,
-        controller_entity_id,
-        next_sequence,
-        PROPERTY_WRITE_PROTOCOL,
-        &data,
-        timeout,
-    )?;
-    Ok(())
-}
-
-/// Sends one explicitly requested linked-stereo headphone trim. The property
-/// is advertised by the device and identified by CueMix Pro's kHeadphoneTrim
-/// model; the record envelope and one-byte attenuation follow the same
-/// generation-compatible output-trim protocol. Channel indices are accepted
-/// only when freshly discovered from the target itself.
-pub(crate) fn set_headphone_trim(
-    host: &str,
-    target_entity_id: u64,
-    output_index: usize,
-    trim: OutputTrim,
-    timeout: Duration,
-) -> Result<(), String> {
-    const RETRY_DELAY: Duration = Duration::from_millis(150);
-    match set_headphone_trim_once(host, target_entity_id, output_index, trim, timeout) {
-        Ok(()) => Ok(()),
-        Err(first_error) => {
-            thread::sleep(RETRY_DELAY);
-            set_headphone_trim_once(host, target_entity_id, output_index, trim, timeout)
-                .map_err(|retry_error| {
-                    format!(
-                        "headphone trim write failed after one fresh-session retry; first attempt: {first_error}; retry: {retry_error}"
-                    )
-                })
-        }
-    }
-}
-
-fn set_headphone_trim_once(
-    host: &str,
-    target_entity_id: u64,
-    output_index: usize,
-    trim: OutputTrim,
-    timeout: Duration,
-) -> Result<(), String> {
-    const CUE_MIX_PROXY_ADDRESS: [u8; 6] = [0x01, 0x00, 0x00, 0x00, 0x01, 0x00];
-    const PROPERTY_WRITE_PROTOCOL: [u8; 6] = [0x00, 0x01, 0xf2, 0x00, 0x00, 0x03];
-    let mut proxy = AvdeccProxy::connect(host, "/", timeout)?;
-    let controller_entity_id = proxy
-        .request_entity_id(CUE_MIX_PROXY_ADDRESS, timeout)?
-        .entity_id
-        .ok_or("AVDECC Proxy did not return a controller identity")?;
-    let (next_sequence, state) =
-        proxy.start_vendor_state(target_entity_id, controller_entity_id, timeout)?;
-    let outputs = headphone_outputs_from_state(&state)?;
-    let output = outputs
-        .get(output_index)
-        .ok_or("that headphone output was not advertised by the device")?;
-    let data = output_trim_payload(HEADPHONE_TRIM_PROPERTY, &output.channel_indices, trim);
-    proxy.vendor_request(
-        target_entity_id,
-        controller_entity_id,
-        next_sequence,
-        PROPERTY_WRITE_PROTOCOL,
-        &data,
-        timeout,
-    )?;
-    Ok(())
-}
-
-/// Sends one explicitly requested physical line-output trim. Its property and
-/// index are freshly discovered from the device before the write is formed.
-pub(crate) fn set_line_output_trim(
-    host: &str,
-    target_entity_id: u64,
-    output_index: usize,
-    trim: OutputTrim,
-    timeout: Duration,
-) -> Result<(), String> {
-    const RETRY_DELAY: Duration = Duration::from_millis(150);
-    match set_line_output_trim_once(host, target_entity_id, output_index, trim, timeout) {
-        Ok(()) => Ok(()),
-        Err(first_error) => {
-            thread::sleep(RETRY_DELAY);
-            set_line_output_trim_once(host, target_entity_id, output_index, trim, timeout).map_err(
-                |retry_error| {
-                    format!(
-                        "line-output trim write failed after one fresh-session retry; first attempt: {first_error}; retry: {retry_error}"
-                    )
-                },
-            )
-        }
-    }
-}
-
-fn set_line_output_trim_once(
-    host: &str,
-    target_entity_id: u64,
-    output_index: usize,
-    trim: OutputTrim,
-    timeout: Duration,
-) -> Result<(), String> {
-    const CUE_MIX_PROXY_ADDRESS: [u8; 6] = [0x01, 0x00, 0x00, 0x00, 0x01, 0x00];
-    const PROPERTY_WRITE_PROTOCOL: [u8; 6] = [0x00, 0x01, 0xf2, 0x00, 0x00, 0x03];
-    let mut proxy = AvdeccProxy::connect(host, "/", timeout)?;
-    let controller_entity_id = proxy
-        .request_entity_id(CUE_MIX_PROXY_ADDRESS, timeout)?
-        .entity_id
-        .ok_or("AVDECC Proxy did not return a controller identity")?;
-    let (next_sequence, state) =
-        proxy.start_vendor_state(target_entity_id, controller_entity_id, timeout)?;
-    let outputs = line_outputs_from_state(&state)?;
-    let output = outputs
-        .get(output_index)
-        .ok_or("that line output was not advertised by the device")?;
-    let data = output_trim_payload(LINE_OUTPUT_TRIM_PROPERTY, &[output.channel_index], trim);
     proxy.vendor_request(
         target_entity_id,
         controller_entity_id,
@@ -783,7 +718,7 @@ fn output_channels_from_state(
     Ok(channels.into_iter().collect())
 }
 
-/// One proxy session owns meters, incremental reads and explicit monitor writes.
+/// One proxy session owns meters, state reads, monitor and output-trim writes.
 /// Background refreshes keep this session and its SSE feed alive.
 pub(crate) fn start_mixer_meter_worker(
     host: String,
@@ -792,7 +727,7 @@ pub(crate) fn start_mixer_meter_worker(
 ) -> MixerMeterWorker {
     let (stop_sender, stop_receiver) = mpsc::channel();
     let (state_sender, state_receiver) = mpsc::channel();
-    let (monitor_sender, monitor_receiver) = mpsc::channel();
+    let (write_sender, write_receiver) = mpsc::channel();
     let meters = Arc::new(MixerMeterFeed::default());
     let worker_meters = Arc::clone(&meters);
     thread::spawn(move || {
@@ -802,14 +737,14 @@ pub(crate) fn start_mixer_meter_worker(
             timeout,
             stop_receiver,
             state_receiver,
-            monitor_receiver,
+            write_receiver,
             worker_meters,
         )
     });
     MixerMeterWorker {
         stop_sender,
         state_sender,
-        monitor_sender,
+        write_sender,
         meters,
     }
 }
@@ -820,7 +755,7 @@ fn run_mixer_meter_worker(
     timeout: Duration,
     stop_receiver: mpsc::Receiver<mpsc::Sender<()>>,
     state_receiver: mpsc::Receiver<VendorSnapshotRequest>,
-    monitor_receiver: mpsc::Receiver<MonitorWriteRequest>,
+    write_receiver: mpsc::Receiver<SessionWriteRequest>,
     meters: Arc<MixerMeterFeed>,
 ) {
     const RETRY_DELAY: Duration = Duration::from_millis(500);
@@ -839,10 +774,38 @@ fn run_mixer_meter_worker(
                     let _ = reply.send(());
                     return;
                 }
-                if let Ok(request) = monitor_receiver.try_recv() {
-                    let result = session.write_monitor(&request.changes, request.deadline, &meters);
-                    let reconnect = result.as_ref().err().is_some_and(|e| !e.conflict);
-                    let _ = request.reply.send(result);
+                if let Ok(request) = write_receiver.try_recv() {
+                    let reconnect = match request {
+                        SessionWriteRequest::Console(request) => {
+                            let result =
+                                session.write_console(&request.changes, request.deadline, &meters);
+                            let reconnect = result.as_ref().err().is_some_and(|e| !e.conflict);
+                            let _ = request.reply.send(result);
+                            reconnect
+                        }
+                        SessionWriteRequest::OutputTrim(request) => {
+                            let result = session.write_output_trim(
+                                request.output,
+                                request.trim,
+                                request.deadline,
+                                &meters,
+                            );
+                            let reconnect = result.is_err();
+                            let _ = request.reply.send(result);
+                            reconnect
+                        }
+                        SessionWriteRequest::InputGain(request) => {
+                            let result = session.write_input_gain(
+                                request.input,
+                                request.gain_db,
+                                request.deadline,
+                                &meters,
+                            );
+                            let reconnect = result.is_err();
+                            let _ = request.reply.send(result);
+                            reconnect
+                        }
+                    };
                     if reconnect {
                         break;
                     }
@@ -1190,7 +1153,98 @@ impl MixerMeterSession {
         Err("CueMix incremental state exceeded 256 pages".into())
     }
 
-    fn write_monitor(
+    fn write_output_trim(
+        &mut self,
+        output: OutputTrimTarget,
+        trim: OutputTrim,
+        deadline: Instant,
+        meters: &Arc<MixerMeterFeed>,
+    ) -> Result<(), String> {
+        // Rediscover on the existing connection. Reopening a vendor session
+        // for every drag position interrupts meters and can time out in setup.
+        let state = self.read_state(deadline, meters)?;
+        let (property, channels) = match output {
+            OutputTrimTarget::Line(index) => {
+                let outputs = line_outputs_from_state(&state)?;
+                let output = outputs
+                    .get(index)
+                    .ok_or("that line output was not advertised by the device")?;
+                (LINE_OUTPUT_TRIM_PROPERTY, vec![output.channel_index])
+            }
+            OutputTrimTarget::Headphones(index) => {
+                let outputs = headphone_outputs_from_state(&state)?;
+                let output = outputs
+                    .get(index)
+                    .ok_or("that headphone output was not advertised by the device")?;
+                (HEADPHONE_TRIM_PROPERTY, output.channel_indices.to_vec())
+            }
+        };
+        let matches = |state: &BTreeMap<(u16, u16), Vec<u8>>| {
+            channels.iter().all(|&index| {
+                state.get(&(property, index)).map(Vec::as_slice) == Some(&[trim.attenuation()][..])
+            })
+        };
+        if matches(&self.state) {
+            return Ok(());
+        }
+        // Both headphone members remain one captured setter payload. Never
+        // retry an uncertain setter; a reconnect is only for future reads.
+        let payload = output_trim_payload(property, &channels, trim);
+        self.exchange([0, 1, 0xf2, 0, 0, 3], &payload, deadline)
+            .map_err(|error| format!("{error}; output trim outcome unknown; no automatic retry"))?;
+        self.read_state(deadline, meters).map_err(|error| {
+            format!(
+                "output trim acknowledged, but readback failed: {error}; refresh before retrying"
+            )
+        })?;
+        if !matches(&self.state) {
+            return Err(
+                "output trim acknowledged, but device readback differs; refresh before retrying"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn write_input_gain(
+        &mut self,
+        input: InputGainTarget,
+        gain_db: u8,
+        deadline: Instant,
+        meters: &Arc<MixerMeterFeed>,
+    ) -> Result<(), String> {
+        input.validate(gain_db)?;
+        let state = self.read_state(deadline, meters)?;
+        let (property, index) = input.property_and_index();
+        let gains = one_byte_property_from_state(&state, property, "input gain")?;
+        let current = *gains
+            .get(&index)
+            .ok_or("that input was not advertised by the device")?;
+        input.validate(current)?;
+        if current == gain_db {
+            return Ok(());
+        }
+        let mut payload = Vec::with_capacity(6);
+        payload.extend(property.to_be_bytes());
+        payload.extend(index.to_be_bytes());
+        payload.extend([1, gain_db]);
+        self.exchange([0, 1, 0xf2, 0, 0, 3], &payload, deadline)
+            .map_err(|error| format!("{error}; input gain outcome unknown; no automatic retry"))?;
+        self.read_state(deadline, meters).map_err(|error| {
+            format!(
+                "input gain acknowledged, but readback failed: {error}; refresh before retrying"
+            )
+        })?;
+        if self.state.get(&(property, index)).map(Vec::as_slice) != Some(&[gain_db][..]) {
+            return Err(
+                "input gain acknowledged, but device readback differs; refresh before retrying"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn write_console(
         &mut self,
         changes: &[ConsoleChange],
         deadline: Instant,
@@ -1201,9 +1255,6 @@ impl MixerMeterSession {
             conflict: message.starts_with("conflict:"),
             message,
         };
-        if !is_monitor_changes(changes) {
-            return Err(error("only monitor controls use the live session".into()));
-        }
         self.read_state(deadline, meters).map_err(error)?;
         let state =
             avdecc_console::ConsoleState::from_records(self.state_records()).map_err(error)?;
@@ -1227,6 +1278,16 @@ impl MixerMeterSession {
                 conflict: false,
                 message,
             })?;
+        if writes
+            .iter()
+            .any(|record| self.state.get(&(record.property, record.index)) != Some(&record.value))
+        {
+            return Err(ConsoleWriteError {
+                applied: writes.len(),
+                conflict: false,
+                message: "console write acknowledged, but device readback differs; refresh before retrying".into(),
+            });
+        }
         Ok((writes.len(), self.monitor_state()))
     }
 }

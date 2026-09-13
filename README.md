@@ -24,11 +24,13 @@ cargo build --release
 
 ## A/B/C monitoring
 
-The **Outputs → Monitoring** panel provides Off/A/B/C/All selection plus
-**A + B**, **A + C**, and **B + C** shortcuts for enabling two groups with one
-click. Each choice replaces the active combination. It also provides the shared
-monitor level, and Monitor Group membership for the discovered Line Outs 1–12.
-Level changes save while dragging, coalesced over 60 milliseconds with only the
+The persistent **Monitor** panel provides the shared monitor level and
+independent **A**, **B**, and **C** buttons: each toggles that speaker pair while
+preserving the other selections. **Off**, **All**, and the combination menu
+select an exact mask, including **A + B**, **A + C**, and **B + C**.
+**Outputs → Monitor setup** contains Monitor Group membership for the discovered
+Line Outs 1–12 and the speaker connections.
+Monitor level changes save while dragging, coalesced over 60 milliseconds with only the
 latest unsent value retained. Membership and speaker selection save immediately.
 **Mute** silences the active ABC speakers or Monitor Group using the device's
 mute latch, preserving the monitor level and speaker selection. **Mono** sums
@@ -43,9 +45,9 @@ Talk uses the microphone, destinations, level and dim already configured in
 None, a level of −∞, or no destinations will produce no talkback audio. The
 browser does not change those settings or the front-panel Latch preference.
 
-Expand **ABC source & speaker connections** to choose the shared left/right
+Open **Monitor setup** to choose the shared left/right
 input and each speaker pair's physical outputs. These edits enter the same
-review tray as Patchbay and Routing; **Apply connections** sends them. Moving a
+review tray as Patchbay and Matrix; **Apply connections** sends them. Moving a
 pair clears its previous physical assignments, and the tray shows any existing
 routes being replaced. Patchbay supports individual-channel/custom assignments.
 There is no automatic speaker wiring or fixed assumption that A means Line 1–2.
@@ -60,7 +62,8 @@ slider remains usable during saving; stale responses cannot
 overwrite newer state or a pending drag. Failed writes are not retried.
 Once an edit finishes, confirmed device values update the slider and label
 even if the browser loses the pointer-release event or the slider keeps focus.
-The five-second Outputs refresh remains as recovery. No monitor setters run in automated
+The five-second shared output/console refresh runs in every visible workspace
+as recovery, including Connections. No monitor setters run in automated
 verification; live listening and new monitor-level/routing setter validation
 remain manual. Mapping details and limits are in
 [the protocol notes](docs/console-protocol.md#abc-monitoring).
@@ -68,8 +71,15 @@ remain manual. Mapping details and limits are in
 ## Start the server
 
 ```sh
-cargo run -- serve 192.168.1.50
+cargo run
+# Or run the compiled program directly:
+./target/release/cuemix-848
 ```
+
+With no arguments, the program serves the device home page at
+`http://127.0.0.1:8480`. Choose a discovered 848 or enter its IP address and
+select **Connect**. To go straight to a known device, use
+`cargo run -- serve 192.168.1.50`.
 
 ## Try it against an 848
 
@@ -290,15 +300,34 @@ case, use bracket notation, for example `"[2604:4080:1503:8036::1]"`.
 cargo run -- probe 192.168.1.50 --save probe.jsonl
 ```
 
-Open the local discovery landing page:
+Start the device home page without arguments:
 
 ```sh
-cargo run -- serve
+cargo run
+# Equivalent: cargo run -- serve
 ```
 
-It performs a read-only mDNS scan at startup and lists each discovered 848.
-Opening a device preserves an allow-list of the advertised, usable control
-addresses for that server session. Restart `serve` to rescan.
+The program performs a read-only mDNS scan at startup and shows discovered
+devices at `http://127.0.0.1:8480`. Select a device address or use **Connect by
+IP** to enter an IPv4 or IPv6 address. Scoped IPv6 such as `fe80::1%eth2` is
+supported; explicit ports are accepted as `192.168.1.50:80` or `[::1]:80`.
+A connection reads `/datastore` and checks its device identity before opening
+the console. Invalid or unreachable addresses show an inline error and leave
+the address available to correct or retry.
+
+**Recent connections** keeps the eight most recent successful manual IP
+connections in this browser, newest first. Click an address to reconnect; it is
+checked again before opening the console. Repeat connections move to the top
+without duplicates. Failed attempts and discovered-device selections do not add
+history. **Clear** removes the list. History persists across restarts when using
+the same browser and server address/port; connecting still works if browser
+storage is unavailable.
+
+**Scan again** refreshes discovery without restarting. The home page and
+manual connection remain usable when discovery fails or finds no devices,
+including networks where multicast does not reach the computer. **← Devices**
+in the console header returns to device selection. Both pages follow the saved
+console color theme.
 
 To skip discovery and start a server scoped to one known device instead:
 
@@ -314,25 +343,39 @@ http://127.0.0.1:8480
 
 The browser server intentionally binds only to a numeric loopback address, and
 each launch issues its own session token for write requests. Fixed-host mode
-accepts only its configured host. Discovery mode accepts only the advertised
-control addresses captured at startup; it does not become an arbitrary-host
-browser proxy.
+accepts only its configured host. Home-page mode accepts discovered control
+addresses and IPs explicitly connected through the same-origin, token-protected
+`POST /api/connect` endpoint after a successful read-only identity check.
+Unselected IPs cannot be admitted through a URL or normal control API request.
+The token-protected `POST /api/discover` rescans without removing addresses
+already in use. These choices last for the server session.
 
 This is a browser-origin safeguard, not authentication against hostile local
 processes. Anyone with local access to the machine may also be able to reach
 the device's HTTP control service directly.
 
-The UI is divided into **Inputs**, **Outputs**, **Patchbay**, **Routing**,
-**Mixing**, **Aux Mixing**, and **Diagnostics**
-tabs. Inputs contains live Mic 1-4 controls for preamp name, gain, 48 V, pad,
-and polarity, plus gain and polarity controls for Line Inputs 5-12. Outputs
-contains line-output gain controls plus the headphone outputs advertised by
-the connected device. Inputs and Outputs show live per-channel signal meters;
-Phones meters retain separate L/R lanes. Patchbay and Routing edit the same
-connections through a searchable list or matrix. Mixing controls each bus;
-Aux Mixing shows one input's sends across buses. Diagnostics keeps the original
-capture-validated fader shortcuts, meter diagnostics, and raw datastore tools. The
-selected tab is retained in the URL fragment.
+The console has five workspaces: **Inputs**, **Outputs**, **Mixing**,
+**Connections**, and **Diagnostics**. Inputs switches between Mic/Inst 1–4
+(name, gain, 48 V, pad and polarity) and Line Inputs 5–12 (gain and polarity).
+Outputs switches between line-output trims and Monitor setup. The Monitor
+and Headphones panel stays available in every workspace. Headphone outputs use
+side-by-side vertical faders with full-height L/R meters and level scales;
+each fader still controls its linked stereo pair. **Show phones** in Outputs
+jumps to and highlights these controls. Mixing switches between **By mix bus** and
+**Aux sends**, while Connections offers **Patchbay** and **Matrix** views of
+the same routes. Diagnostics keeps the capture-validated fader shortcuts,
+meter diagnostics and raw datastore tools. Existing URL fragments still work.
+
+Channel strips occupy one row with previous/next bank controls. The number of
+visible strips adapts to the available width with no fixed channel-count cap;
+the bus master remains visible while paging mixer inputs. Hardware banks hide
+existing controls without
+rebuilding them, preserving pending edits and meter bindings. Strip widths and
+heights are capped so large windows leave unused space around the controls.
+Desktop faders shorten for smaller windows, with contained scrolling for
+unusually short windows or expanded details. Narrow screens put monitoring below the workspace and
+allow normal page scrolling. System, Light and Dark themes use local assets;
+the binary makes no requests for fonts, icons or other UI dependencies.
 
 Input and line-output strip headings are not fixed display strings. The UI
 reads `ch/<index>/name` from Mic input bank `0`, Analog input bank `1`, and
@@ -360,10 +403,15 @@ controls. These indices are shown as the 848's physical Line Inputs 5-12.
 The Inputs tab discovers the sorted gain and polarity record sets and requires
 their indices to match before exposing either control. Gain is limited to
 integer `0` through `20` dB and polarity to boolean values. Like Mic gain, Line
-Input gain updates its displayed value immediately, debounces writes while the
-slider moves, writes `/datastore/ext/ibank/1/ch/<index>/trim`, and uses the
-750-millisecond HTTP refresh to recover changes from other controllers. The
-vendor snapshot is retained only for the polarity state that HTTP omits.
+Input gain updates its displayed value immediately and coalesces writes every
+80 ms while the slider moves. Both input banks use `/api/inputs/gain` and the
+persistent meter connection: Mic gain is one-byte property `0x1389` (0–74 dB),
+and Line gain is `0x13b2` (0–20 dB). Each update validates the advertised index
+and range, skips no-ops, and verifies a fresh inventory readback before success.
+The 750-millisecond HTTP refresh still recovers changes from other controllers.
+Names, phantom power, pad and Mic polarity retain their datastore writes.
+See [input-gain evidence](docs/console-protocol.md#input-gain-sliders) for the
+installed-client mapping and read-only hardware comparison.
 
 One explicit polarity change writes only a freshly discovered index through
 protocol `00:01:f2:00:00:03`, using
@@ -386,6 +434,12 @@ The Outputs tab discovers every `0x1388` record rather than assuming the 848's
 otherwise converts the byte to its negative integer dB value. One explicit
 slider change forms a protocol-`...:03` record
 `13:88:<u16 index>:01:<attenuation>` for only the freshly discovered output.
+Line and headphone trims reuse the persistent meter connection: each request
+reads fresh inventory, sends at most one setter, and verifies the selected
+channel(s) with fresh readback. No-op trims send no setter. Queueing,
+discovery, acknowledgement and readback share one timeout; an uncertain write
+is not retried automatically. This avoids closing and reopening the vendor
+session for every position during a drag, which caused repeated setup timeouts.
 The exact write is not exercised by automated verification. No line-output
 write is sent while rendering, refreshing, polling, or testing.
 
@@ -415,8 +469,9 @@ A user slider change sends both members of only the freshly discovered stereo
 pair through vendor property protocol `00:01:f2:00:00:03`. Each record is
 `13:b7:<u16 index>:01:<attenuation>`, where the one-byte attenuation is the
 positive magnitude of a `-99` through `0` dB value or `100` for negative
-infinity. The UI serializes requests against the local meter session and never
-sends a headphone write automatically. While Outputs is visible, a five-second
+infinity. Both members are sent in one payload through the persistent meter
+session and read back before success is reported. The UI serializes requests and never
+sends a headphone write automatically. While the page is visible, a five-second
 read-only snapshot poll recovers front-panel or other-controller changes until
 the vendor notification lifecycle is implemented. Close CueMix Pro before
 changing an output gain: concurrent external-controller behavior has not been
@@ -427,10 +482,10 @@ generation-compatible output-trim traffic.
 
 ### Patchbay, routing, mixing, and aux sends
 
-**Patchbay** lists the current source for each destination. Choose a destination
+**Connections → Patchbay** lists the current source for each destination. Choose a destination
 group, search for a source, and stage one channel or a consecutive range of up
 to 32 channels. “Same source” duplicates a mono source across the selected
-destinations. **Routing** offers the same edits as a paged source/destination
+destinations. **Matrix** offers the same edits as a paged source/destination
 matrix. Both views share a review tray; only **Apply connections** writes to
 the device. Discarding a draft changes nothing on the hardware.
 
@@ -444,13 +499,43 @@ establish AVB stream connections to other devices.
 **Mixing** selects Main, an aux bus, or Reverb and shows its input strips plus
 the bus master. Input stereo links and aux pairing follow the device's current
 configuration. Controls include level, pan, input mute/solo, master level/mute,
-and aux/reverb pre/post-fader selection. Faders save on release; numeric entries
+and aux/reverb pre/post-fader selection. Faders and pan save while dragging; numeric entries
 save on Enter or blur. Levels accept `-inf` or −90 through +12 dB. Input mute
-and solo affect that input across mixes. **Aux Mixing** selects one input and
+and solo affect that input across mixes. **Mixing → Aux sends** selects one input and
 shows all its aux/reverb sends together. Pre/post is a bus-wide setting.
 
-The console refreshes every five seconds while visible, over the same persistent
-connection as the meters. Each refresh reads the device inventory independently
+Every control's dB readout accepts an exact typed value, including mic and line
+gain, line and headphone output trim, monitor level, mixer channels, aux sends,
+and bus masters. Click the number, type a value, then press Enter or move focus
+to apply; Escape cancels. Typing alone does not send intermediate values. Mic
+and line gain use their whole-dB slider ranges, output and monitor levels accept
+whole dB values through 0 dB, and mixer levels use 0.1 dB steps from −90 to +12 dB.
+Controls with a silent endpoint also accept `-inf`. Invalid values are rejected
+without clamping, and live polling preserves unfinished edits. A headphone
+entry sets both channels to the same level, matching its linked slider.
+Typed values use the same persistent connection and save queues as dragging.
+
+All slider writes share the persistent meter connection, including input gains,
+physical line/headphone trims, mixer/aux levels, bus masters, pan and monitor
+level. They no longer stop the worker or open a new device session per update.
+The worker retains the target identity for its lifetime, avoiding repeated HTTP
+identity requests. Failed connections reopen only for reads or new explicit
+requests; an uncertain setter is never replayed automatically.
+
+All sliders send updates during dragging. Input gains, physical output and
+headphone trims, mixer/aux levels, bus masters and pan use an 80 ms coalescing
+window with one request in flight and only the latest unsent position per
+control. Releasing flushes the final position without duplicating an update
+already sent. Mixer writes retain conflict checks and complete readback before
+the next buffered position; the active fader stays enabled and is not replaced
+by the refreshed snapshot. Device response time can reduce the update rate.
+A failed update clears buffered positions and stops that gesture; start a new
+drag after reviewing the error. Device changes cancel unsent work. Input and
+output polling remains the recovery path for physical-control changes.
+
+The console and permanent monitor panel share a five-second Outputs recovery
+refresh while the page is visible, over the same persistent connection as the
+meters. Each refresh reads the device inventory independently
 of the incremental event cache; the worker also reconciles it in the background.
 Background reads leave controls enabled and preserve a focused strip, including
 the original value used to detect a conflicting edit. An edit made during a
@@ -458,10 +543,10 @@ read waits for it to finish, then saves and verifies readback. Transient read
 failures retain the last confirmed values; after 15 seconds without a successful
 read, editing pauses until recovery. Failed write readback pauses editing
 immediately. HTTP preamp polling runs only while Inputs is visible.
-Every edit includes the previously read value. Before the first write, the
+Every console batch includes the previously read value. Before the first write, the
 server checks the entire batch against a fresh snapshot, validates inventories
 and ranges, and rejects conflicts. Each write requires a matching successful
-acknowledgement; the UI then reads back and verifies the values. Batches are
+acknowledgement and fresh server readback; the UI also reconciles the values. Batches are
 sequential, not atomic: a failure can leave some connections applied, which the
 UI reconciles on refresh. Failed writes are never automatically retried.
 
@@ -474,15 +559,16 @@ and AVB connection management remain outside this implementation. A/B/C monitor
 configuration is available in Outputs. See [console protocol evidence](docs/console-protocol.md).
 
 Run the offline model and UI race tests with
-`node --test tools/console-model.test.cjs tools/console-refresh.test.cjs tools/monitor.test.cjs`.
+`node --test tools/console-model.test.cjs tools/console-refresh.test.cjs tools/monitor.test.cjs tools/console-layout.test.cjs`.
 For browser testing without audio hardware, run `node tools/console-fixture.cjs`
-and open `http://127.0.0.1:8482/#patchbay`. That server uses synthetic state,
-never contacts a device, and keeps edits only in memory. Rust runtime and
+and open `http://127.0.0.1:8482/#mixer`. That server supplies synthetic preamps,
+line inputs, outputs, headphones, a multi-bank mixer and live example meters.
+It never contacts a device and keeps edits only in memory. Rust runtime and
 production UI still have no external dependencies.
 
 ### Live channel meters
 
-The Inputs, Outputs, Mixing, Aux Mixing, and Diagnostics tabs share one local, read-only AVDECC meter
+All workspaces share one local, read-only AVDECC meter
 session. It uses the capture-observed protocol `00:01:f2:00:00:04`, receives
 its two meter pages, and exposes both the packed words and decoded channels.
 The browser opens `/api/mixer/meters/events` as a Server-Sent Events stream;
@@ -523,9 +609,10 @@ jumps to every new louder sample and holds that position for one second after
 the live level falls. Inventory refreshes for the console, line inputs, and
 outputs share the persistent meter session. Incremental state polls run between
 meter requests; independent full inventory reads recover missed state events.
-Each refresh has a total deadline and a 256-page limit. Monitor-level, selection
-and membership writes reuse this connection; other explicit vendor writes
-still close it first, and the event stream reconnects afterward.
+Each refresh has a total deadline and a 256-page limit. All slider and console
+batch writes reuse this connection, including routing and monitor buttons.
+Only legacy diagnostic presets and Line Input polarity retain their separate
+session lifecycle; these controls are not sliders.
 Empty startup snapshots preserve the last displayed values, so a bounded
 restart does not flash every meter to zero. The device request
 loop targets a 5-millisecond interval; actual cadence is bounded by the time

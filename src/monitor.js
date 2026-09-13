@@ -13,7 +13,8 @@ globalThis.CueMixMonitor = (() => {
   }
   const selectedNames = mask => ['A', 'B', 'C'].filter((_, i) => mask & (1 << i)).join(' + ') || 'Off';
   const volumeText = value => value === -100 ? '−∞ dB' : `${value} dB`;
-  function render(model, drafts, setupOpen = false) {
+  const frontButtonText = (label, state) => `<span class="monitor-action-label">${label}</span><span class="monitor-action-state">${state}</span>`;
+  function render(model, drafts, setupOpen = false, section = 'all') {
     if (!model.monitorAvailable) return '<p class="empty">This device does not advertise the mapped ABC monitor controls.</p>';
     const mask = M.number(model.get(0x13b6, 0));
     const attenuation = M.number(model.get(0x1393, 0));
@@ -30,11 +31,13 @@ globalThis.CueMixMonitor = (() => {
       ['monitor-talk', 0x13a3, 'Talk', 'Talkback', 'Click to talk; click again to stop. Uses the talkback setup in CueMix Pro → Home.'],
     ].map(([operation, property, label, name, help]) => {
       const value = model.get(property, 0), available = /^0[01]$/.test(value), active = value === '01';
-      return `<div><button class="secondary" ${attrs(operation, !available)} data-value="${active ? 0 : 1}" aria-label="${name}" aria-describedby="${operation}-help" aria-pressed="${active}">${label} · ${available ? (active ? 'On' : 'Off') : 'Unavailable'}</button><small id="${operation}-help">${help}</small></div>`;
+      return `<div><button class="secondary" ${attrs(operation, !available)} data-value="${active ? 0 : 1}" aria-label="${name}" aria-describedby="${operation}-help" aria-pressed="${active}">${frontButtonText(label, available ? (active ? 'On' : 'Off') : 'Unavailable')}</button><small id="${operation}-help">${help}</small></div>`;
     }).join('');
     const selectionButton = ([value, name]) => `<button class="secondary" ${attrs('monitor-select')} data-value="${value}" aria-label="${value ? `Select speakers ${name}` : 'Turn ABC off'}" aria-pressed="${mask === value}">${name}</button>`;
-    const quickSelections = [[0, 'Off'], [1, 'A'], [2, 'B'], [4, 'C'], [7, 'All']].map(selectionButton).join('');
-    const combinedSelections = [[3, 'A + B'], [5, 'A + C'], [6, 'B + C']].map(selectionButton).join('');
+    const speakerButtons = [1, 2, 4].map((bit, i) => `<button class="secondary" ${attrs('monitor-select')} data-monitor-toggle="${bit}" data-value="${mask ^ bit}" aria-label="Toggle speakers ${'ABC'[i]}" aria-pressed="${!!(mask & bit)}">${'ABC'[i]}</button>`).join('');
+    const quickSelections = [[0, 'Off'], [7, 'All']].map(selectionButton).join('');
+    const combinations = [[0, 'Off'], [1, 'A only'], [2, 'B only'], [4, 'C only'], [3, 'A + B'], [5, 'A + C'], [6, 'B + C'], [7, 'All']];
+    const combinedSelections = `<select id="monitorCombination" data-monitor-combination ${attrs('monitor-select')} aria-label="Speaker combination">${combinations.map(([value, name]) => `<option value="${value}"${value === mask ? ' selected' : ''}>${name}</option>`).join('')}</select>`;
     const outputs = physical(model), choices = pairs(model);
     const cards = [0, 1, 2].map(bank => {
       const connected = [0, 1].map(channel => outputs.filter(d => effective(model, drafts, d) === M.path(0x13b9, bank, channel)));
@@ -50,11 +53,13 @@ globalThis.CueMixMonitor = (() => {
       return `<label>${channel ? 'Right' : 'Left'} input <select data-monitor-input="${channel}" data-monitor-edit aria-label="ABC ${channel ? 'right' : 'left'} input">${!model.sourceMap.has(value) ? `<option value="${esc(value)}" selected>${esc(model.sourceName(value))}</option>` : ''}${[...new Set(sources.map(s => s.group))].map(group => `<optgroup label="${esc(group)}">${sources.filter(s => s.group === group).map(s => `<option value="${s.id}"${s.id === value ? ' selected' : ''}>${esc(s.name)}</option>`).join('')}</optgroup>`).join('')}</select></label>`;
     };
     const disconnected = [0, 1].some(i => model.get(0x93b9, i) === '00000000');
-    return `<div class="monitor-top"><div class="monitor-volume console-strip"><label for="monitorLevel">Monitor level</label><output id="monitorLevelValue">${validLevel ? volumeText(level) : 'Unavailable'}</output><input id="monitorLevel" type="range" min="-100" max="0" step="1" value="${level}" aria-label="Monitor level" aria-valuetext="${volumeText(level)}" ${attrs('monitor-level', !validLevel)}><small>Same level as the front-panel monitor knob.</small></div><div class="monitor-switch"><strong>Speaker selection · ${selectedNames(mask)}</strong><div class="monitor-buttons" role="group" aria-label="ABC speaker selection">${quickSelections}</div><div class="monitor-buttons monitor-combinations" role="group" aria-label="ABC speaker combinations">${combinedSelections}</div><p>${mask ? 'ABC mode · all selected pairs share the monitor input and level.' : 'ABC is off · the monitor knob controls the line outputs selected below.'}</p><strong class="monitor-muted"${model.get(0x139b, 0) === '01' ? '' : ' hidden'}>Muted on the device</strong></div></div>
+    const controls = `<div class="monitor-top"><div class="monitor-volume console-strip"><label for="monitorLevel">Monitor level</label><input id="monitorLevelValue" class="db-input" type="text" inputmode="decimal" data-db-for="monitorLevel" data-db-infinity="-100" value="${validLevel ? volumeText(level) : 'Unavailable'}" aria-label="Monitor level in decibels" title="Type a level or -inf. Enter to apply; Escape to cancel." ${attrs('monitor-level', !validLevel)}><input id="monitorLevel" type="range" min="-100" max="0" step="1" value="${level}" aria-label="Monitor level" aria-valuetext="${volumeText(level)}" ${attrs('monitor-level', !validLevel)}><small>Same level as the front-panel monitor knob.</small></div><div class="monitor-switch"><strong>Speaker selection · ${selectedNames(mask)}</strong><div class="monitor-buttons" role="group" aria-label="ABC speaker selection">${speakerButtons}</div><div class="monitor-shortcuts">${quickSelections}${combinedSelections}</div><p>${mask ? 'ABC speakers share the monitor level.' : 'ABC off · Monitor Group active.'}</p><strong class="monitor-muted"${model.get(0x139b, 0) === '01' ? '' : ' hidden'}>Muted on the device</strong></div></div>
       <div class="monitor-actions" role="group" aria-label="Front-panel controls">${frontButtons}</div>
-      ${disconnected ? '<p class="monitor-notice">ABC has an unassigned input. Choose its source and speaker connections below before listening.</p>' : ''}
+      ${disconnected ? '<p class="monitor-notice">ABC has an unassigned input. Open Monitor setup to choose its source.</p>' : ''}`;
+    const setup = `
       <details id="monitorSetup"${setupOpen ? ' open' : ''}><summary>ABC source &amp; speaker connections</summary><p>Choose the shared stereo signal, then the outputs for each speaker pair. Review and apply the staged connections below.</p><div class="monitor-inputs">${inputSelect(0)}${inputSelect(1)}</div><div class="monitor-speakers">${cards}</div><p class="muted">For individual channels or additional destinations, use <a href="#patchbay">Patchbay</a>. Line-output trims below adjust the relative speaker levels.</p></details>
       <div class="monitor-members"><h3>Monitor Group <span class="muted">· when ABC is off</span></h3><p>Choose the line outputs controlled together by the monitor knob. Each selection saves immediately.</p><div role="group" aria-label="Monitor Group line outputs">${lines.map(d => `<label><input type="checkbox" data-monitor-member="${d.index}" data-monitor-edit${members & (1 << d.index) ? ' checked' : ''}${!validMembers ? ' data-unavailable="true" disabled' : ''}>${esc(d.name)}</label>`).join('')}</div>${!validMembers ? '<p class="muted">Group membership is unavailable or contains unmapped outputs.</p>' : ''}</div>`;
+    return section === 'controls' ? controls : section === 'setup' ? setup : controls + setup;
   }
   function pairChanges(model, drafts, bank, pairId) {
     if (!Number.isInteger(bank) || bank < 0 || bank > 2) throw Error('Invalid speaker pair');
@@ -135,13 +140,19 @@ globalThis.CueMixMonitor = (() => {
       const value=String(-parseInt(get(0x1393),16));
       if(level.value!==value)level.value=value;
       const text=volumeText(Number(level.value));
-      document.getElementById('monitorLevelValue').textContent=text;level.setAttribute('aria-valuetext',text);
+      CueMixDb.sync(document.getElementById('monitorLevelValue'), text);level.setAttribute('aria-valuetext',text);
     }
     const mask=parseInt(get(0x13b6),16);
     if(Number.isInteger(mask)) {
       document.querySelector('.monitor-switch strong').textContent=`Speaker selection · ${selectedNames(mask)}`;
-      document.querySelectorAll('[data-control="monitor-select"]').forEach(button=>button.setAttribute('aria-pressed',String(Number(button.dataset.value)===mask)));
-      document.querySelector('.monitor-switch p').textContent=mask ? 'ABC mode · all selected pairs share the monitor input and level.' : 'ABC is off · the monitor knob controls the line outputs selected below.';
+      document.querySelectorAll('button[data-control="monitor-select"]').forEach(button=>{
+        const bit = Number(button.dataset.monitorToggle);
+        button.setAttribute('aria-pressed', String(bit ? !!(mask & bit) : Number(button.dataset.value) === mask));
+        if (bit) button.dataset.value = String(mask ^ bit);
+      });
+      const combination = document.getElementById('monitorCombination');
+      if (combination) combination.value = String(mask);
+      document.querySelector('.monitor-switch p').textContent=mask ? 'ABC speakers share the monitor level.' : 'ABC off · Monitor Group active.';
       document.querySelectorAll('.monitor-speaker').forEach((card,bank)=>{
         const active=!!(mask&(1<<bank));
         card.classList.toggle('is-selected',active);
@@ -150,13 +161,16 @@ globalThis.CueMixMonitor = (() => {
     }
     const members=parseInt(get(0x1394),16);
     if(Number.isInteger(members)) document.querySelectorAll('[data-monitor-member]').forEach(node=>{node.checked=!!(members&(1<<Number(node.dataset.monitorMember)));});
-    for(const [operation,property,label] of [['monitor-mute',0x139b,'Mute'],['monitor-mono',0x139a,'Mono'],['monitor-talk',0x13a3,'Talk']]) {
+    for(const [operation,property] of [['monitor-mute',0x139b],['monitor-mono',0x139a],['monitor-talk',0x13a3]]) {
       const button=document.querySelector(`[data-control="${operation}"]`), value=get(property);
       if(button && /^0[01]$/.test(value)) {
         const active=value==='01';
         button.setAttribute('aria-pressed',String(active));
         button.dataset.value=active?'0':'1';
-        button.textContent=`${label} · ${active?'On':'Off'}`;
+        // Meter events arrive while a pointer may be held over the label.
+        // Replacing the children here can remove its pending click target.
+        const stateNode=button.querySelector('.monitor-action-state'), text=active?'On':'Off';
+        if(stateNode && stateNode.textContent!==text)stateNode.textContent=text;
       }
     }
     const muted=document.querySelector('.monitor-muted');

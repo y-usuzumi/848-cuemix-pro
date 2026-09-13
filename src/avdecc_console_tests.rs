@@ -228,7 +228,6 @@ fn front_panel_buttons_require_advertised_booleans_and_reject_batch_conflicts() 
         ("monitor-talk", 0x13a3),
     ] {
         let enable = parse_changes(&format!("{operation}:monitor:0:00:1")).unwrap();
-        assert!(is_monitor_changes(&enable));
         assert!(console.prepare(&enable).is_err()); // Not advertised yet.
         for malformed in [vec![2], vec![0, 0]] {
             console.records.insert((property, 0), malformed);

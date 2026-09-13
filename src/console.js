@@ -8,6 +8,59 @@
   let selectedView = '', loadedHost = '', lastRead = 0;
   let refreshTask = null, deferredSnapshot = null;
   let outputGeneration = 0;
+  let streaming = false, sliderRevision = 0;
+  const sliderConfirmed = new Map();
+  const sliderKey = node => `${node.dataset.control}:${node.dataset.target}:${node.dataset.index}`;
+  const outputBusy = () => (typeof outputWritePending !== 'undefined' && outputWritePending) ||
+    (typeof headphoneWritePending !== 'undefined' && headphoneWritePending);
+  const sliders = CueMixSliders.createQueue({
+    ready: () => !writing && !monitorSync.busy() && !outputBusy(),
+    async send({ changes, description, revision, host }) {
+      if (host !== el('host').value) return;
+      if (!online || loadedHost !== host) throw Error('Refresh before making another slider change.');
+      // Only our verified writes can advance a buffered edit's expected
+      // value. External changes still produce a server-side conflict.
+      changes = changes.map(change => {
+        const prior = sliderConfirmed.get(change.id);
+        return prior && prior.revision > revision ? { ...change, expected: prior.encoded } : change;
+      }).filter(change => change.expected !== change.encoded);
+      if (!changes.length) return;
+      const saved = await apply(changes, description, false, true);
+      if (!saved) throw Error(''); // apply already reports the precise error.
+      sliderRevision++;
+      for (const change of changes) sliderConfirmed.set(change.id, { revision: sliderRevision, encoded: change.encoded });
+    },
+    onError(_, error) { if (error.message) status(error.message, 'error'); },
+    onIdle() {
+      if (model) document.querySelectorAll('input[type="range"][data-control]').forEach(node => {
+        const { control, target, index } = node.dataset;
+        if (!['level', 'master', 'pan'].includes(control)) return;
+        const raw = model.records.get(M.address(control, target, Number(index)));
+        if (raw === undefined) return;
+        const value = control === 'pan' ? M.number(raw) / 16777216 * 2 - 1 : M.level(raw);
+        if (value === null) return;
+        node.value = String(value === -Infinity ? -91 : value);
+        previewSlider(node);
+      });
+      if (!editingStrip()) { deferredSnapshot = null; render(); }
+    },
+  });
+  function queueSlider(node, final = false) {
+    sliders.enqueue(sliderKey(node), node.value, {
+      changes: controlChanges(node), description: node.getAttribute('aria-label') || 'mix setting',
+      revision: sliderRevision, host: el('host').value,
+    }, final);
+  }
+  function previewSlider(node) {
+    if (['level', 'master'].includes(node.dataset.control)) {
+      const db = Number(node.value) <= -91 ? -Infinity : Number(node.value);
+      const strip = node.closest('.console-strip');
+      strip.querySelector('.console-value').textContent = dbText(db);
+      const entry = strip.querySelector('.console-level-entry input');
+      CueMixDb.sync(entry, db === -Infinity ? '−∞' : db.toFixed(1));
+      node.setAttribute('aria-valuetext', dbText(db));
+    } else if (node.dataset.control === 'pan') node.closest('.console-pan').querySelector('.pan-value').textContent = panText(Number(node.value));
+  }
   const monitorSync = CueMixMonitor.createSync({
     async send(changes) {
       if (writing || !online || loadedHost !== el('host').value ||
@@ -21,11 +74,13 @@
     },
     onState(confirmed,display) {
       if(model) for(const [p,i,value] of confirmed.records) model.records.set(M.key(p,i),value);
-      if(selectedView==='outputs') CueMixMonitor.syncDom(display);
+      CueMixMonitor.syncDom(display);
     },
     onStatus: (message,state='')=>status(message,state),
   });
-  let patchPage = 0, matrixRowPage = 0, matrixColPage = 0;
+  let patchPage = 0, matrixRowPage = 0, matrixColPage = 0, mixPage = 0, auxPage = 0;
+  const L = globalThis.CueMixLayout;
+  const bankSize = (id, minimum = 108, maximum = Infinity) => L ? L.size(id, minimum, maximum) : 6;
   let drafts = new Map();
   const dbText = db => db === null ? 'Unavailable' : db === -Infinity ? '−∞ dB' : `${db > 0 ? '+' : ''}${db.toFixed(1)} dB`;
   const selectedBus = () => model?.buses.find(bus => bus.id === el('mixBus').value);
@@ -39,7 +94,10 @@
   function availability() {
     document.querySelectorAll('.console-panel').forEach(panel => {
       panel.dataset.offline = String(!online);
-      panel.querySelectorAll('[data-control], [data-route], [data-monitor-edit], #stagePatch').forEach(control => { control.disabled = writing || !online || control.dataset.unavailable === 'true'; });
+      panel.querySelectorAll('[data-control], [data-route], [data-monitor-edit], #stagePatch').forEach(control => {
+        const liveSlider = streaming && control.type === 'range' && !control.dataset.control?.startsWith('monitor-');
+        control.disabled = (writing && !liveSlider) || !online || control.dataset.unavailable === 'true';
+      });
     });
     el('applyRoutes').disabled = writing || !online || !drafts.size || hasConflict();
     el('discardRoutes').disabled = writing;
@@ -69,13 +127,13 @@
     select.innerHTML = [...new Set(sources.map(s => s.group))].map(group => `<optgroup label="${escape(group)}">${sources.filter(s => s.group === group).map(s => option(s.id, s.name)).join('')}</optgroup>`).join('');
     if (sources.some(s => s.id === previous)) select.value = previous;
   }
-  function acceptSnapshot(snapshot) {
+  function acceptSnapshot(snapshot, preserveControls = false) {
     model = M.create(snapshot);
     monitorSync.seed(snapshot);
     for(const [p,i,value] of monitorSync.snapshot().records) model.records.set(M.key(p,i),value);
-    refreshChoices(); render();
+    if (!preserveControls) { refreshChoices(); render(); }
   }
-  function editingStrip() { return document.activeElement?.closest('.console-strip, #monitorControls'); }
+  function editingStrip() { return document.activeElement?.closest('.console-strip, #monitorControls, #monitorSetupControls'); }
   function refresh({ quiet = false, force = false, afterWrite = false } = {}) {
     if (loading) return refreshTask;
     if ((writing && !afterWrite) || (!views.includes(selectedView) && !force) || (document.hidden && !force)) return Promise.resolve(false);
@@ -89,8 +147,11 @@
       if (generation !== epoch || host !== el('host').value || (writing && !afterWrite)) return false;
       // A user may start editing AFTER a background request begins. Preserve
       // both the DOM and its expected values until that edit is committed.
-      if (editingStrip() && model && !afterWrite) deferredSnapshot = snapshot;
-      else { deferredSnapshot = null; acceptSnapshot(snapshot); }
+      if ((editingStrip() || sliders.busy()) && model && !afterWrite) deferredSnapshot = snapshot;
+      else {
+        deferredSnapshot = streaming ? snapshot : null;
+        acceptSnapshot(snapshot, streaming);
+      }
       loadedHost = host; online = true; lastRead = Date.now();
       status(`${model.destinations.length} destinations · ${model.channels.length} input strips · ${model.buses.length} mixes · Updated ${new Date().toLocaleTimeString()}`);
       return true;
@@ -108,13 +169,15 @@
     if (!model) return;
     if (selectedView === 'patchbay') renderPatchbay();
     if (selectedView === 'routing') renderMatrix();
-    if (selectedView === 'mixer') renderMixer();
-    if (selectedView === 'aux') renderAux();
-    if (selectedView === 'outputs') {
-      const open = el('monitorSetup')?.open;
-      if(!monitorSync.busy()) el('monitorControls').innerHTML = CueMixMonitor.render(model, drafts, open);
-      CueMixMonitor.syncDom(monitorSync.display());
+    if (selectedView === 'mixer' && !sliders.busy() && !editingStrip()) renderMixer();
+    if (selectedView === 'aux' && !sliders.busy() && !editingStrip()) renderAux();
+    if (!monitorSync.busy() && !document.activeElement?.closest('#monitorControls')) {
+      el('monitorControls').innerHTML = CueMixMonitor.render(model, drafts, false, 'controls');
     }
+    if (selectedView === 'outputs' && !document.activeElement?.closest('#monitorSetupControls')) {
+      el('monitorSetupControls').innerHTML = CueMixMonitor.render(model, drafts, true, 'setup');
+    }
+    CueMixMonitor.syncDom(monitorSync.display());
     renderDrafts(); availability();
     if (typeof lastMeterRecords !== 'undefined') meters(lastMeterRecords);
   }
@@ -125,22 +188,24 @@
   function renderPatchbay() {
     const search = el('patchSearch').value.toLowerCase().trim();
     const rows = model.destinations.filter(d => d.group === el('patchGroup').value && `${d.name} ${model.sourceName(d.source)}`.toLowerCase().includes(search));
-    patchPage = Math.min(patchPage, Math.max(0, Math.ceil(rows.length / 24) - 1));
-    el('patchList').innerHTML = rows.slice(patchPage * 24, patchPage * 24 + 24).map(d => {
+    const count = 6;
+    patchPage = Math.min(patchPage, Math.max(0, Math.ceil(rows.length / count) - 1));
+    el('patchList').innerHTML = rows.slice(patchPage * count, patchPage * count + count).map(d => {
       const draft = drafts.get(M.key(d.property, d.index));
       const source = draft?.value ?? d.source;
       return `<div class="patch-row${draft ? ' is-planned' : ''}"><strong>${escape(d.name)}</strong><span class="route-arrow" aria-hidden="true">←</span><div class="route-source">${escape(model.sourceName(source))}${draft ? `<small>Was ${escape(model.sourceName(d.source))}</small>` : ''}</div><div class="route-row-actions"><button class="secondary" data-edit-route="${d.id}" aria-label="Change source for ${escape(d.name)}">Change</button><button class="secondary" data-route="${d.id}" data-source="00000000" aria-label="Disconnect ${escape(d.name)}">Clear</button></div></div>`;
     }).join('') || '<p class="empty">No connections match your search.</p>';
-    el('patchPages').innerHTML = pageControls('connections', patchPage, rows.length, 24);
+    el('patchPages').innerHTML = pageControls('connections', patchPage, rows.length, count);
   }
   function renderMatrix() {
     const rows = model.destinations.filter(d => d.group === el('matrixDestGroup').value);
     const sources = model.sources.filter(s => s.group === el('matrixSourceGroup').value);
-    matrixRowPage = Math.min(matrixRowPage, Math.max(0, Math.ceil(rows.length / 16) - 1));
-    matrixColPage = Math.min(matrixColPage, Math.max(0, Math.ceil(sources.length / 16) - 1));
-    const visibleSources = sources.slice(matrixColPage * 16, matrixColPage * 16 + 16);
-    el('matrixPages').innerHTML = `<div>Destinations ${pageControls('destinations', matrixRowPage, rows.length, 16)}</div><div>Sources ${pageControls('sources', matrixColPage, sources.length, 16)}</div>`;
-    el('routingMatrix').innerHTML = `<table aria-label="Audio routing matrix"><thead><tr><th scope="col">Destination ← source</th>${visibleSources.map(s => `<th scope="col">${escape(s.name)}</th>`).join('')}</tr></thead><tbody>${rows.slice(matrixRowPage * 16, matrixRowPage * 16 + 16).map(d => {
+    const rowCount = 8, colCount = Math.max(2, bankSize('routingMatrix', 85, 12) - 1);
+    matrixRowPage = Math.min(matrixRowPage, Math.max(0, Math.ceil(rows.length / rowCount) - 1));
+    matrixColPage = Math.min(matrixColPage, Math.max(0, Math.ceil(sources.length / colCount) - 1));
+    const visibleSources = sources.slice(matrixColPage * colCount, matrixColPage * colCount + colCount);
+    el('matrixPages').innerHTML = `<div>Destinations ${pageControls('destinations', matrixRowPage, rows.length, rowCount)}</div><div>Sources ${pageControls('sources', matrixColPage, sources.length, colCount)}</div>`;
+    el('routingMatrix').innerHTML = `<table aria-label="Audio routing matrix"><thead><tr><th scope="col">Destination ← source</th>${visibleSources.map(s => `<th scope="col">${escape(s.name)}</th>`).join('')}</tr></thead><tbody>${rows.slice(matrixRowPage * rowCount, matrixRowPage * rowCount + rowCount).map(d => {
       const draft = drafts.get(M.key(d.property, d.index)), effective = draft?.value ?? d.source;
       return `<tr><td><strong>${escape(d.name)}</strong><small>${escape(model.sourceName(effective))}${draft ? ' · Staged' : ''}</small></td>${visibleSources.map(s => `<td><button class="matrix-cell${d.source === s.id ? ' connected' : ''}${draft && effective === s.id ? ' planned' : ''}" data-route="${d.id}" data-source="${effective === s.id ? '00000000' : s.id}" aria-label="${escape(d.name)} receives ${escape(s.name)}${draft && effective === s.id ? ' (staged)' : ''}" aria-pressed="${effective === s.id}">${effective === s.id ? (draft ? '◉' : '●') : d.source === s.id ? '○' : '·'}</button></td>`).join('')}</tr>`;
     }).join('')}</tbody></table>`;
@@ -176,6 +241,8 @@
   function renderDrafts() {
     const tray = el('consoleDraftTray');
     tray.hidden = !drafts.size || !['patchbay', 'routing', 'outputs'].includes(selectedView);
+    el('routeCount').hidden = !drafts.size;
+    el('routeCount').textContent = drafts.size;
     el('draftCount').textContent = `${drafts.size} staged connection${drafts.size === 1 ? '' : 's'}`;
     el('draftHint').textContent = hasConflict() ? 'Some device routes changed. Remove those edits and stage them again.' : 'Your hardware changes only when you apply.';
     el('draftList').innerHTML = [...drafts.values()].map(d => `<div class="draft-row${model.records.get(d.id) !== d.expected ? ' draft-conflict' : ''}"><span><strong>${escape(d.label)}</strong>: ${escape(model.sourceName(d.expected))} → ${escape(model.sourceName(d.value))}${model.records.get(d.id) !== d.expected ? ' · Device changed' : ''}</span><button class="secondary" data-remove-draft="${d.id}" aria-label="Remove staged connection for ${escape(d.label)}">Remove</button></div>`).join('');
@@ -187,7 +254,8 @@
     const db = M.level(value), available = db !== null;
     const position = db === -Infinity ? -91 : Math.max(-90, Math.min(12, db ?? -91));
     const entry = db === -Infinity ? '-inf' : db === null ? '' : db.toFixed(1);
-    return `<output class="console-value">${dbText(db)}</output><div class="strip-fader-body"><input type="range" class="console-fader" min="-91" max="12" step="0.1" value="${position}" aria-label="${escape(name)} level" aria-valuetext="${dbText(db)}" ${controlAttrs(operation, target, index, !available)}>${members.map(member => `<span class="console-meter" aria-label="${escape(name)} input meter"><i class="meter-fill" data-console-meter="${meterBank}:${member}"></i></span>`).join('')}${meterScaleMarkup()}</div><label class="console-level-entry"><input inputmode="decimal" value="${entry}" data-initial="${entry}" aria-label="${escape(name)} level in decibels" ${controlAttrs(operation, target, index, !available)}><span>dB</span></label>`;
+    const sliderId = escape(`mix-${operation}-${target}-${index}`);
+    return `<output class="console-value">${dbText(db)}</output><div class="strip-fader-body"><input id="${sliderId}" type="range" class="console-fader" min="-91" max="12" step="0.1" value="${position}" aria-label="${escape(name)} level" aria-valuetext="${dbText(db)}" ${controlAttrs(operation, target, index, !available)}>${members.map(member => `<span class="console-meter" aria-label="${escape(name)} input meter"><i class="meter-fill" data-console-meter="${meterBank}:${member}"></i></span>`).join('')}${meterScaleMarkup()}</div><label class="console-level-entry"><input class="db-input" type="text" inputmode="decimal" value="${entry}" data-db-for="${sliderId}" data-db-infinity="-91" data-db-min="-90" data-db-decimals="1" data-db-unit="none" aria-label="${escape(name)} level in decibels" title="Type a level or -inf. Enter to apply; Escape to cancel." ${controlAttrs(operation, target, index, !available)}><span>dB</span></label>`;
   }
   function panMarkup(bus, channel, name) {
     const raw = model.get(bus.pan, (channel.index << 8) | (bus.id.startsWith('aux-') ? bus.index : 0));
@@ -216,14 +284,22 @@
     if (!bus) { el('consoleStrips').innerHTML = '<p class="empty">No mixer buses were advertised by this device.</p>'; el('consoleMaster').innerHTML = ''; return; }
     const search = el('mixSearch').value.toLowerCase();
     const channels = model.channels.filter(channel => channel.name.toLowerCase().includes(search) && (!el('mixActiveOnly').checked || M.number(model.get(bus.fader, (channel.index << 8) | (bus.id.startsWith('aux-') ? bus.index : 0))) > 0));
-    el('consoleStrips').innerHTML = channels.map(channel => strip(bus, channel)).join('') || '<p class="empty">No inputs match this filter.</p>';
+    const count = bankSize('consoleStrips');
+    mixPage = Math.min(mixPage, Math.max(0, Math.ceil(channels.length / count) - 1));
+    el('panel-mixer').setAttribute('style', `--mix-strip-count: ${Math.max(1, Math.min(count, channels.length - mixPage * count))}`);
+    el('mixPages').innerHTML = pageControls('mix inputs', mixPage, channels.length, count);
+    el('consoleStrips').innerHTML = channels.slice(mixPage * count, (mixPage + 1) * count).map(channel => strip(bus, channel)).join('') || '<p class="empty">No inputs match this filter.</p>';
     el('consoleMaster').innerHTML = `<article class="console-strip"><h3>${escape(bus.name)}</h3><div class="channel-subtitle">Bus master · ${bus.stereo ? 'Stereo' : 'Mono'}</div>${levelMarkup('master', bus.id, bus.index, model.get(bus.gain, bus.index), bus.name + ' master', bus.meterBank, bus.members)}<div class="strip-buttons">${toggle('master-mute',bus.id,bus.index,'Mute bus',bus.mute,bus.name)}</div>${preButton(bus)}</article>`;
   }
   function renderAux() {
     const channel = selectedChannel();
-    el('auxSends').innerHTML = channel ? model.buses.filter(bus => bus.id !== 'main').map(bus => strip(bus, channel, true)).join('') : '<p class="empty">No mixer inputs were advertised by this device.</p>';
+    const buses = model.buses.filter(bus => bus.id !== 'main'), count = bankSize('auxSends');
+    auxPage = Math.min(auxPage, Math.max(0, Math.ceil(buses.length / count) - 1));
+    el('panel-aux').setAttribute('style', `--mix-strip-count: ${Math.max(1, Math.min(count, buses.length - auxPage * count))}`);
+    el('auxPages').innerHTML = pageControls('aux sends', auxPage, buses.length, count);
+    el('auxSends').innerHTML = channel ? buses.slice(auxPage * count, (auxPage + 1) * count).map(bus => strip(bus, channel, true)).join('') : '<p class="empty">No mixer inputs were advertised by this device.</p>';
   }
-  async function apply(changes, description, routing = false) {
+  async function apply(changes, description, routing = false, continuous = false) {
     if (!changes.length || writing || !online || loadedHost !== el('host').value) return;
     if(monitorSync.busy()) {status('Wait for the monitor change to finish saving, then try again.');return;}
     if ((typeof outputWritePending !== 'undefined' && outputWritePending) || (typeof headphoneWritePending !== 'undefined' && headphoneWritePending)) {
@@ -231,7 +307,7 @@
     }
     const host = loadedHost, generation = epoch;
     outputGeneration++;
-    writing = true; deferredSnapshot = null; availability(); status(`Saving ${description}…`);
+    writing = true; streaming = continuous; deferredSnapshot = null; availability(); status(`Saving ${description}…`);
     let failure = null;
     try {
       // Let an in-flight read finish, without allowing it to replace the
@@ -245,7 +321,7 @@
     if (generation !== epoch) return;
     await refresh({ force:true, quiet:true, afterWrite:true });
     if (generation !== epoch) return;
-    writing = false;
+    writing = false; streaming = false;
     const matched = online && changes.every(c => model.records.get(c.id) === c.encoded);
     if (routing && online) {
       for (const c of changes) if (model.records.get(c.id) === c.encoded) drafts.delete(c.id);
@@ -255,6 +331,7 @@
     else if (!matched) status('The write was acknowledged, but the device reports a different value. The current device values are shown; review before retrying.', 'error');
     else status(`Saved ${description}. Verified against the device.`, 'saved');
     render();
+    return !failure && matched;
   }
   function controlChanges(node) {
     const { control: operation, target, index: rawIndex } = node.dataset;
@@ -287,6 +364,10 @@
     });
   }
   function run(action) { try { action(); } catch (error) { status(error.message, 'error'); } }
+  for (const type of ['pointerdown', 'keydown']) document.addEventListener(type, event => {
+    const node = event.target;
+    if (node.type === 'range' && node.dataset.control && !event.repeat) sliders.begin(sliderKey(node));
+  });
   document.addEventListener('click', event => {
     const button = event.target.closest('button');
     if (!button) return;
@@ -296,6 +377,8 @@
       if (button.dataset.page === 'connections') patchPage += delta;
       if (button.dataset.page === 'destinations') matrixRowPage += delta;
       if (button.dataset.page === 'sources') matrixColPage += delta;
+      if (button.dataset.page === 'mix inputs') mixPage += delta;
+      if (button.dataset.page === 'aux sends') auxPage += delta;
       render(); return;
     }
     if (button.dataset.editRoute) {
@@ -317,18 +400,26 @@
     if (!node.dataset.control || node.type !== 'range') return;
     if (node.dataset.control === 'monitor-level') {
       const text = CueMixMonitor.volumeText(Number(node.value));
-      el('monitorLevelValue').textContent = text; node.setAttribute('aria-valuetext', text);
+      CueMixDb.sync(el('monitorLevelValue'), text); node.setAttribute('aria-valuetext', text);
       run(()=>monitorSync.queue('monitor-level',Number(node.value)===-100?'-inf':node.value));
-    } else if (['level','master'].includes(node.dataset.control)) {
-      const db = Number(node.value) <= -91 ? -Infinity : Number(node.value);
-      const strip = node.closest('.console-strip');
-      strip.querySelector('.console-value').textContent = dbText(db);
-      strip.querySelector('.console-level-entry input').value = db === -Infinity ? '-inf' : db.toFixed(1);
-      node.setAttribute('aria-valuetext',dbText(db));
-    } else if (node.dataset.control === 'pan') node.closest('.console-pan').querySelector('.pan-value').textContent = panText(Number(node.value));
+    } else previewSlider(node);
+    if (node.dataset.control !== 'monitor-level') run(() => queueSlider(node));
+  });
+  document.addEventListener('dbcommit', event => {
+    const node = event.target;
+    if (!node.dataset.control || node.type !== 'range' || node.disabled) return;
+    run(() => {
+      if (node.dataset.control === 'monitor-level') monitorSync.queue('monitor-level', Number(node.value) === -100 ? '-inf' : node.value);
+      else {
+        sliders.begin(sliderKey(node));
+        previewSlider(node);
+        queueSlider(node, true);
+      }
+    });
   });
   document.addEventListener('change', event => {
     const node = event.target;
+    if (node.dataset.monitorCombination !== undefined) run(() => monitorSync.queue('monitor-select', node.value));
     if (node.dataset.monitorMember !== undefined) run(() => {
       const bit = 1 << Number(node.dataset.monitorMember), mask = M.number(model.get(0x1394, 0));
       const displayed = monitorSync.display().records.find(r=>r[0]===0x1394);
@@ -347,20 +438,16 @@
     });
     if (node.dataset.control && node.type === 'range') run(() => {
       if(node.dataset.control==='monitor-level') monitorSync.queue('monitor-level',Number(node.value)===-100?'-inf':node.value);
-      else apply(controlChanges(node), node.getAttribute('aria-label') || 'mix setting');
+      else queueSlider(node, true);
     });
   });
   document.addEventListener('focusout', event => {
     const node = event.target;
-    if (node.dataset.initial !== undefined && node.value !== node.dataset.initial) run(() => { apply(controlChanges(node), node.getAttribute('aria-label') || 'mix setting'); });
     setTimeout(() => {
-      if (deferredSnapshot && !writing && !editingStrip()) {
+      if (deferredSnapshot && !writing && !sliders.busy() && !editingStrip()) {
         const snapshot = deferredSnapshot; deferredSnapshot = null; acceptSnapshot(snapshot);
       }
     }, 0);
-  });
-  document.addEventListener('keydown', event => {
-    if (event.key === 'Enter' && event.target.dataset.control && event.target.type !== 'range' && event.target.tagName === 'INPUT') event.target.blur();
   });
   el('stagePatch').addEventListener('click', () => run(stageBuilder));
   el('discardRoutes').addEventListener('click', () => { if (!writing) { drafts.clear(); render(); } });
@@ -368,18 +455,20 @@
   for (const id of ['patchGroup','matrixDestGroup','matrixSourceGroup','mixBus','auxInput']) el(id).addEventListener('change', () => {
     preferences[id] = el(id).value;
     try { localStorage.setItem(stateKey, JSON.stringify(preferences)); } catch { /* View still works without storage. */ }
-    patchPage = matrixRowPage = matrixColPage = 0; refreshBuilder(); render();
+    patchPage = matrixRowPage = matrixColPage = mixPage = auxPage = 0; refreshBuilder(); render();
   });
-  for (const id of ['patchSearch','mixSearch']) el(id).addEventListener('input', () => { patchPage = 0; render(); });
-  el('mixActiveOnly').addEventListener('change', render);
+  for (const id of ['patchSearch','mixSearch']) el(id).addEventListener('input', () => { patchPage = mixPage = 0; render(); });
+  el('mixActiveOnly').addEventListener('change', () => { mixPage = 0; render(); });
   el('sourceSearch').addEventListener('input', refreshBuilder);
-  el('host').addEventListener('change', () => { epoch++; monitorSync.reset(); loading = writing = online = false; refreshTask = deferredSnapshot = null; model = null; drafts.clear(); loadedHost = ''; lastRead = 0; refresh({force:true}); });
-  // Poll even during edits; defer adopting results until focus leaves the strip.
-  setInterval(() => { if (!document.hidden && views.includes(selectedView)) refresh({quiet:true}); }, 5000);
+  el('host').addEventListener('change', () => { epoch++; monitorSync.reset(); sliders.reset(); sliderConfirmed.clear(); sliderRevision = 0; streaming = false; loading = writing = online = false; refreshTask = deferredSnapshot = null; model = null; drafts.clear(); loadedHost = ''; lastRead = 0; refresh({force:true}); });
+  // The shell's Outputs recovery poll now supplies the same full console
+  // snapshot in every view. Standalone consumers retain their own polling.
+  setInterval(() => { if (typeof loadOutputs !== 'function' && !document.hidden && views.includes(selectedView)) refresh({quiet:true}); }, 5000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh({force:true,quiet:true}); });
   globalThis.consoleUi = {
     activate(view) { selectedView = view; el('consoleDraftTray').hidden = !drafts.size || !['patchbay','routing','outputs'].includes(view); if (views.includes(view)) refresh(); else if (view === 'outputs' && model) render(); },
-    busy: () => writing || monitorSync.busy(),
+    busy: () => writing || sliders.busy() || monitorSync.busy(),
+    resize() { if (!writing && !editingStrip()) render(); },
     monitorState(snapshot, healthy) { if(healthy && !writing) monitorSync.receive(snapshot); },
     outputRevision: () => `${epoch}:${outputGeneration}`,
     outputs(snapshot, host, revision, monitor) {
@@ -387,7 +476,7 @@
       if (!snapshot) { this.outputsError(Error('Monitoring snapshot is unavailable'), host, revision); return; }
       try {
         if(monitor) monitorSync.receive(monitor);
-        if (editingStrip() && model) deferredSnapshot = snapshot;
+        if ((editingStrip() || sliders.busy()) && model) deferredSnapshot = snapshot;
         else { deferredSnapshot = null; acceptSnapshot(snapshot); }
         loadedHost = host; online = true; lastRead = Date.now();
         status(`Monitoring updated ${new Date().toLocaleTimeString()}`); availability();
@@ -400,5 +489,5 @@
     },
     meters,
   };
-  consoleUi.activate(document.querySelector('[role="tab"][aria-selected="true"]')?.dataset.tab || 'inputs');
+  consoleUi.activate(document.body?.dataset.view || document.querySelector('[data-tab][aria-current="page"]')?.dataset.tab || 'inputs');
 })();

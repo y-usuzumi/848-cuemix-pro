@@ -1,18 +1,19 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(not(target_os = "windows"))]
 use std::fs::File;
 use std::io::{self, BufRead, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::avdecc::{
-    is_monitor_changes, parse_changes, set_headphone_trim, set_line_input_phase,
-    set_line_output_trim, set_mixer_fader, start_mixer_meter_worker, write_console, ConsoleChange,
-    ConsoleWriteError, HeadphoneOutput, LineInput, LineOutput, MeterPath, MixerFader, MixerLevel,
-    MixerMeterFeed, MixerMeterRecord, MixerMeters, MonitorState, MonitorWriteRequest,
-    OutputInventory, OutputTrim, VendorSnapshot, VendorSnapshotRequest,
+    parse_changes, set_line_input_phase, set_mixer_fader, start_mixer_meter_worker, ConsoleChange,
+    ConsoleWriteError, ConsoleWriteRequest, HeadphoneOutput, InputGainTarget,
+    InputGainWriteRequest, LineInput, LineOutput, MeterPath, MixerFader, MixerLevel,
+    MixerMeterFeed, MixerMeterRecord, MixerMeters, MonitorState, OutputInventory, OutputTrim,
+    OutputTrimTarget, OutputTrimWriteRequest, SessionWriteRequest, VendorSnapshot,
+    VendorSnapshotRequest,
 };
 use crate::device::{datastore_write_request, json_escape, percent_decode, DeviceClient};
 use crate::discovery::{browser_control_hosts, discover_avdecc, DiscoveryResult};
@@ -39,7 +40,36 @@ extern "system" {
 
 enum ServerScope {
     Configured(String),
-    Discovered(Vec<DiscoveryResult>),
+    Discovered(Mutex<HomeDevices>),
+}
+
+#[derive(Default)]
+struct HomeDevices {
+    devices: Vec<DiscoveryResult>,
+    // Keep selected/discovered addresses for this server session, including
+    // when a later scan misses a device with an open console.
+    hosts: HashSet<String>,
+    discovery_error: Option<String>,
+}
+
+impl HomeDevices {
+    fn new(result: Result<Vec<DiscoveryResult>, String>) -> Self {
+        let mut home = Self::default();
+        home.update(result);
+        home
+    }
+
+    fn update(&mut self, result: Result<Vec<DiscoveryResult>, String>) {
+        match result {
+            Ok(devices) => {
+                self.hosts
+                    .extend(devices.iter().flat_map(browser_control_hosts));
+                self.devices = devices;
+                self.discovery_error = None;
+            }
+            Err(error) => self.discovery_error = Some(error),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -48,15 +78,96 @@ struct MeterHub {
 }
 
 struct MeterWorker {
+    target_entity_id: u64,
     stop_sender: mpsc::Sender<mpsc::Sender<()>>,
     state_sender: mpsc::Sender<VendorSnapshotRequest>,
-    monitor_sender: mpsc::Sender<MonitorWriteRequest>,
+    write_sender: mpsc::Sender<SessionWriteRequest>,
     pending_stop: Option<mpsc::Receiver<()>>,
     meters: Arc<MixerMeterFeed>,
 }
 
 impl MeterHub {
-    fn write_monitor(
+    fn existing_target(&self, host: &str) -> Result<Option<u64>, String> {
+        let mut workers = self
+            .workers
+            .lock()
+            .map_err(|_| "device session registry unavailable")?;
+        Self::reap_stopped(&mut workers, host)?;
+        Ok(workers.get(host).map(|worker| worker.target_entity_id))
+    }
+
+    fn write_sender(
+        &self,
+        host: &str,
+        target: u64,
+        timeout: Duration,
+    ) -> Result<mpsc::Sender<SessionWriteRequest>, String> {
+        self.start(host, target, timeout)?;
+        let workers = self
+            .workers
+            .lock()
+            .map_err(|_| "device session registry unavailable")?;
+        let worker = workers.get(host).ok_or("device session unavailable")?;
+        if worker.pending_stop.is_some() {
+            return Err("device session is closing".into());
+        }
+        Ok(worker.write_sender.clone())
+    }
+
+    fn write_output_trim(
+        &self,
+        host: &str,
+        target: u64,
+        output: OutputTrimTarget,
+        trim: OutputTrim,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        let sender = self.write_sender(host, target, timeout)?;
+        let (reply, receiver) = mpsc::channel();
+        sender
+            .send(SessionWriteRequest::OutputTrim(OutputTrimWriteRequest {
+                deadline,
+                output,
+                trim,
+                reply,
+            }))
+            .map_err(|_| "output worker unavailable")?;
+        receiver
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| {
+                "output trim response timed out; outcome unknown; refresh before retrying"
+            })?
+    }
+
+    fn write_input_gain(
+        &self,
+        host: &str,
+        target: u64,
+        input: InputGainTarget,
+        gain_db: u8,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        input.validate(gain_db)?;
+        let deadline = Instant::now() + timeout;
+        let sender = self.write_sender(host, target, timeout)?;
+        let (reply, receiver) = mpsc::channel();
+        sender
+            .send(SessionWriteRequest::InputGain(InputGainWriteRequest {
+                deadline,
+                input,
+                gain_db,
+                reply,
+            }))
+            .map_err(|_| "input gain worker unavailable")?;
+        receiver
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| {
+                "input gain response timed out; outcome unknown; refresh before retrying"
+            })?
+    }
+
+    fn write_console(
         &self,
         host: &str,
         target: u64,
@@ -68,31 +179,21 @@ impl MeterHub {
             conflict: false,
             message,
         };
-        self.start(host, target, timeout).map_err(error)?;
-        let sender = {
-            let workers = self
-                .workers
-                .lock()
-                .map_err(|_| error("device session registry unavailable".into()))?;
-            let worker = workers
-                .get(host)
-                .ok_or_else(|| error("device session unavailable".into()))?;
-            if worker.pending_stop.is_some() {
-                return Err(error("device session is closing".into()));
-            }
-            worker.monitor_sender.clone()
-        };
+        let deadline = Instant::now() + timeout;
+        let sender = self.write_sender(host, target, timeout).map_err(error)?;
         let (reply, receiver) = mpsc::channel();
         sender
-            .send(MonitorWriteRequest {
-                deadline: Instant::now() + timeout,
+            .send(SessionWriteRequest::Console(ConsoleWriteRequest {
+                deadline,
                 changes,
                 reply,
-            })
-            .map_err(|_| error("monitor worker unavailable".into()))?;
-        receiver.recv_timeout(timeout).map_err(|_| {
-            error("monitor response timed out; outcome unknown; refresh before retrying".into())
-        })?
+            }))
+            .map_err(|_| error("console worker unavailable".into()))?;
+        receiver
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| {
+                error("console response timed out; outcome unknown; refresh before retrying".into())
+            })?
     }
     fn reap_stopped(workers: &mut HashMap<String, MeterWorker>, host: &str) -> Result<(), String> {
         if let Some(receiver) = workers
@@ -140,9 +241,10 @@ impl MeterHub {
         let worker = workers.entry(host.to_string()).or_insert_with(|| {
             let worker = start_mixer_meter_worker(host.to_string(), target_entity_id, timeout);
             MeterWorker {
+                target_entity_id,
                 stop_sender: worker.stop_sender,
                 state_sender: worker.state_sender,
-                monitor_sender: worker.monitor_sender,
+                write_sender: worker.write_sender,
                 meters: worker.meters,
                 pending_stop: None,
             }
@@ -231,7 +333,7 @@ pub(crate) fn serve(
     }
     let scope = match default_host {
         Some(host) => ServerScope::Configured(host.to_string()),
-        None => ServerScope::Discovered(discover_avdecc(timeout)?),
+        None => ServerScope::Discovered(Mutex::new(HomeDevices::new(discover_avdecc(timeout)))),
     };
     let listener = TcpListener::bind(listen_address)
         .map_err(|error| format!("listen on {listen_address} failed: {error}"))?;
@@ -241,8 +343,12 @@ pub(crate) fn serve(
     println!("cuemix-848 UI: {expected_origin}");
     match &scope {
         ServerScope::Configured(host) => println!("default device: {host}"),
-        ServerScope::Discovered(devices) => {
-            println!("discovered devices: {}", devices.len());
+        ServerScope::Discovered(home) => {
+            let home = home.lock().map_err(|_| "device directory unavailable")?;
+            println!("discovered devices: {}", home.devices.len());
+            if let Some(error) = &home.discovery_error {
+                eprintln!("discovery unavailable: {error}; manual IP connection is available");
+            }
         }
     }
 
@@ -609,22 +715,63 @@ fn route_browser_request(
         ("GET", "/") => {
             let params = parse_query(query);
             match scope {
-                ServerScope::Discovered(devices) if !params.contains_key("host") => {
+                ServerScope::Discovered(home) if !params.contains_key("host") => {
+                    let home = match home.lock() {
+                        Ok(home) => home,
+                        Err(_) => return json_error(502, "device directory unavailable"),
+                    };
                     BrowserResponse {
                         status: 200,
                         content_type: "text/html; charset=utf-8",
-                        body: ui::render_discovery(devices),
+                        body: ui::render_discovery(
+                            &home.devices,
+                            session_token,
+                            home.discovery_error.as_deref(),
+                        ),
                     }
                 }
                 _ => match allowed_host(&params, scope) {
                     Ok(host) => BrowserResponse {
                         status: 200,
                         content_type: "text/html; charset=utf-8",
-                        body: ui::render(&host, session_token),
+                        body: ui::render(
+                            &host,
+                            session_token,
+                            matches!(scope, ServerScope::Discovered(_)),
+                        ),
                     },
                     Err(error) => json_error(400, &error),
                 },
             }
+        }
+        ("POST", "/api/connect") | ("POST", "/api/discover") => {
+            let mut params = parse_query(query);
+            params.extend(parse_query(body));
+            if !is_authorized(origin, params.get("token"), expected_origin, session_token) {
+                return json_error(403, "invalid origin or session token");
+            }
+            let ServerScope::Discovered(home) = scope else {
+                return json_error(400, "this server is limited to its configured device host");
+            };
+            if path == "/api/connect" {
+                return connect_home_device(&params, home, timeout);
+            }
+            let result = discover_avdecc(timeout);
+            let mut home = match home.lock() {
+                Ok(home) => home,
+                Err(_) => return json_error(502, "device directory unavailable"),
+            };
+            home.update(result);
+            json_response(
+                200,
+                format!(
+                    r#"{{"html":"{}","error":{}}}"#,
+                    json_escape(&ui::render_device_list(&home.devices)),
+                    home.discovery_error
+                        .as_ref()
+                        .map_or("null".into(), |error| format!("\"{}\"", json_escape(error))),
+                ),
+            )
         }
         ("GET", "/api/probe") => {
             let params = parse_query(query);
@@ -650,7 +797,7 @@ fn route_browser_request(
         }
         ("GET", "/api/console") => {
             let params = parse_query(query);
-            let (host, target) = match vendor_target(&params, scope, timeout) {
+            let (host, target) = match vendor_target(&params, scope, meter_hub, timeout) {
                 Ok(target) => target,
                 Err(error) => return error,
             };
@@ -676,29 +823,18 @@ fn route_browser_request(
                 Ok(changes) => changes,
                 Err(error) => return json_error(400, &error),
             };
-            let (host, target) = match vendor_target(&params, scope, timeout) {
+            let (host, target) = match vendor_target(&params, scope, meter_hub, timeout) {
                 Ok(target) => target,
                 Err(error) => return error,
             };
-            if is_monitor_changes(&changes) {
-                return match meter_hub.write_monitor(&host, target, changes, timeout) {
-                    Ok((applied, monitor)) => json_response(
-                        200,
-                        format!(
-                            r#"{{"acknowledged":{applied},"monitor":{}}}"#,
-                            monitor.json()
-                        ),
+            match meter_hub.write_console(&host, target, changes, timeout) {
+                Ok((applied, monitor)) => json_response(
+                    200,
+                    format!(
+                        r#"{{"acknowledged":{applied},"monitor":{}}}"#,
+                        monitor.json()
                     ),
-                    Err(error) => {
-                        json_response(if error.conflict { 409 } else { 502 }, error.json())
-                    }
-                };
-            }
-            if let Err(error) = meter_hub.stop(&host, timeout) {
-                return json_error(502, &error);
-            }
-            match write_console(&host, target, &changes, timeout) {
-                Ok(applied) => json_response(200, format!(r#"{{"acknowledged":{applied}}}"#)),
+                ),
                 Err(error) => json_response(if error.conflict { 409 } else { 502 }, error.json()),
             }
         }
@@ -741,6 +877,14 @@ fn route_browser_request(
                 return json_error(403, "invalid origin or session token");
             }
             proxy_line_input_phase_or_error(&params, scope, meter_hub, timeout)
+        }
+        ("POST", "/api/inputs/gain") => {
+            let mut params = parse_query(query);
+            params.extend(parse_query(body));
+            if !is_authorized(origin, params.get("token"), expected_origin, session_token) {
+                return json_error(403, "invalid origin or session token");
+            }
+            proxy_input_gain_or_error(&params, scope, meter_hub, timeout)
         }
         ("POST", "/api/outputs/headphone-trim") => {
             let mut params = parse_query(query);
@@ -793,21 +937,101 @@ fn allowed_host(params: &HashMap<String, String>, scope: &ServerScope) -> Result
             Some(host) if host == default_host => Ok(default_host.clone()),
             Some(_) => Err("this server is limited to its configured device host".to_string()),
         },
-        ServerScope::Discovered(devices) => {
+        ServerScope::Discovered(home) => {
             let host = params
                 .get("host")
-                .ok_or("select a discovered device before using the control API")?;
-            if devices
-                .iter()
-                .flat_map(browser_control_hosts)
-                .any(|candidate| candidate == *host)
+                .ok_or("choose a device on the home page before using the control API")?;
+            if home
+                .lock()
+                .map_err(|_| "device directory unavailable")?
+                .hosts
+                .contains(host)
             {
                 Ok(host.clone())
             } else {
-                Err("this server is limited to addresses discovered at startup".to_string())
+                Err("choose this device on the home page or connect by IP first".to_string())
             }
         }
     }
+}
+
+fn manual_device_host(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if let Ok(ip) = value.parse::<IpAddr>() {
+        return Ok(match ip {
+            IpAddr::V4(ip) => ip.to_string(),
+            IpAddr::V6(ip) => format!("[{ip}]"),
+        });
+    }
+    if let Ok(address) = value.parse::<SocketAddr>() {
+        if address.port() == 80 {
+            // An explicitly typed default HTTP port must not redirect the
+            // separate AVDECC connection from its normal port 17221 to 80.
+            return Ok(address.to_string().strip_suffix(":80").unwrap().to_string());
+        }
+        if address.port() != 0 {
+            return Ok(address.to_string());
+        }
+    }
+    let unbracketed = value
+        .strip_prefix('[')
+        .and_then(|v| v.strip_suffix(']'))
+        .unwrap_or(value);
+    let (address, scope) = unbracketed
+        .split_once('%')
+        .map_or((unbracketed, None), |(ip, zone)| (ip, Some(zone)));
+    if let Ok(ip) = address.parse::<Ipv6Addr>() {
+        match scope {
+            None => return Ok(format!("[{ip}]")),
+            Some(zone)
+                if !zone.is_empty()
+                    && zone
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')) =>
+            {
+                return Ok(format!("[{ip}%{zone}]"));
+            }
+            _ => {}
+        }
+    }
+    Err("Enter a valid IPv4 or IPv6 address, for example 192.168.1.50.".into())
+}
+
+fn connect_home_device(
+    params: &HashMap<String, String>,
+    home: &Mutex<HomeDevices>,
+    timeout: Duration,
+) -> BrowserResponse {
+    let host = match params
+        .get("host")
+        .ok_or_else(|| "Enter the device IP address.".to_string())
+        .and_then(|host| manual_device_host(host))
+    {
+        Ok(host) => host,
+        Err(error) => return json_error(400, &error),
+    };
+    // Connecting is read-only. Admit a manual address only after it responds
+    // with the compatibility datastore identity expected by the console.
+    let result = DeviceClient::new(&host, timeout)
+        .and_then(|client| client.request("GET", "/datastore", None))
+        .and_then(|response| {
+            if !(200..300).contains(&response.status) {
+                return Err(format!(
+                    "Device returned HTTP {} {}",
+                    response.status, response.reason
+                ));
+            }
+            datastore_entity_id(&response.body).map(|_| ())
+        });
+    if let Err(error) = result {
+        return json_error(502, &format!("Could not connect to {host}: {error}"));
+    }
+    let mut home = match home.lock() {
+        Ok(home) => home,
+        Err(_) => return json_error(502, "device directory unavailable"),
+    };
+    home.hosts.insert(host.clone());
+    json_response(200, format!(r#"{{"host":"{}"}}"#, json_escape(&host)))
 }
 
 fn proxy_get_or_error(
@@ -933,7 +1157,7 @@ fn proxy_outputs_or_error(
     meter_hub: &MeterHub,
     timeout: Duration,
 ) -> BrowserResponse {
-    let (host, target_entity_id) = match vendor_target(params, scope, timeout) {
+    let (host, target_entity_id) = match vendor_target(params, scope, meter_hub, timeout) {
         Ok(target) => target,
         Err(response) => return response,
     };
@@ -960,7 +1184,7 @@ fn proxy_headphones_or_error(
     meter_hub: &MeterHub,
     timeout: Duration,
 ) -> BrowserResponse {
-    let (host, target_entity_id) = match vendor_target(params, scope, timeout) {
+    let (host, target_entity_id) = match vendor_target(params, scope, meter_hub, timeout) {
         Ok(target) => target,
         Err(response) => return response,
     };
@@ -998,18 +1222,21 @@ fn proxy_headphone_trim_or_error(
         Ok(trim) => trim,
         Err(error) => return json_error(400, &error),
     };
-    let (host, target_entity_id) = match vendor_target(params, scope, timeout) {
+    let (host, target_entity_id) = match vendor_target(params, scope, meter_hub, timeout) {
         Ok(target) => target,
         Err(response) => return response,
     };
-    if let Err(error) = meter_hub.stop(&host, timeout) {
-        return json_error(502, &error);
-    }
-    match set_headphone_trim(&host, target_entity_id, output_index, trim, timeout) {
+    match meter_hub.write_output_trim(
+        &host,
+        target_entity_id,
+        OutputTrimTarget::Headphones(output_index),
+        trim,
+        timeout,
+    ) {
         Ok(()) => json_response(
             200,
             format!(
-                "{{\"status\":200,\"body\":\"Phones {} trim acknowledged\"}}",
+                "{{\"status\":200,\"body\":\"Phones {} trim verified\"}}",
                 output_index + 1
             ),
         ),
@@ -1042,18 +1269,21 @@ fn proxy_line_output_trim_or_error(
         Ok(trim) => trim,
         Err(error) => return json_error(400, &error),
     };
-    let (host, target_entity_id) = match vendor_target(params, scope, timeout) {
+    let (host, target_entity_id) = match vendor_target(params, scope, meter_hub, timeout) {
         Ok(target) => target,
         Err(response) => return response,
     };
-    if let Err(error) = meter_hub.stop(&host, timeout) {
-        return json_error(502, &error);
-    }
-    match set_line_output_trim(&host, target_entity_id, output_index, trim, timeout) {
+    match meter_hub.write_output_trim(
+        &host,
+        target_entity_id,
+        OutputTrimTarget::Line(output_index),
+        trim,
+        timeout,
+    ) {
         Ok(()) => json_response(
             200,
             format!(
-                "{{\"status\":200,\"body\":\"Line Out {} trim acknowledged\"}}",
+                "{{\"status\":200,\"body\":\"Line Out {} trim verified\"}}",
                 output_index + 1
             ),
         ),
@@ -1067,7 +1297,7 @@ fn proxy_line_inputs_or_error(
     meter_hub: &MeterHub,
     timeout: Duration,
 ) -> BrowserResponse {
-    let (host, target_entity_id) = match vendor_target(params, scope, timeout) {
+    let (host, target_entity_id) = match vendor_target(params, scope, meter_hub, timeout) {
         Ok(target) => target,
         Err(response) => return response,
     };
@@ -1096,7 +1326,7 @@ fn proxy_line_input_phase_or_error(
         Some(_) => return json_error(400, "line-input phase must be 0 or 1"),
         None => return json_error(400, "missing line-input phase"),
     };
-    let (host, target_entity_id) = match vendor_target(params, scope, timeout) {
+    let (host, target_entity_id) = match vendor_target(params, scope, meter_hub, timeout) {
         Ok(target) => target,
         Err(response) => return response,
     };
@@ -1121,6 +1351,45 @@ fn proxy_line_input_phase_or_error(
     }
 }
 
+fn proxy_input_gain_or_error(
+    params: &HashMap<String, String>,
+    scope: &ServerScope,
+    meter_hub: &MeterHub,
+    timeout: Duration,
+) -> BrowserResponse {
+    let parsed = (|| {
+        let index = params
+            .get("input")
+            .ok_or("missing input")?
+            .parse::<u16>()
+            .map_err(|_| "input must be a zero-based integer")?;
+        let input = match params.get("bank").map(String::as_str) {
+            Some("mic") => InputGainTarget::Preamp(index),
+            Some("line") => InputGainTarget::Line(index),
+            _ => return Err("input bank must be mic or line".to_string()),
+        };
+        let gain = params
+            .get("gain_db")
+            .ok_or("missing input gain")?
+            .parse::<u8>()
+            .map_err(|_| "input gain must be a nonnegative integer")?;
+        input.validate(gain)?;
+        Ok((input, gain))
+    })();
+    let (input, gain) = match parsed {
+        Ok(values) => values,
+        Err(error) => return json_error(400, &error),
+    };
+    let (host, target) = match vendor_target(params, scope, meter_hub, timeout) {
+        Ok(target) => target,
+        Err(error) => return error,
+    };
+    match meter_hub.write_input_gain(&host, target, input, gain, timeout) {
+        Ok(()) => json_response(200, r#"{"status":200,"body":"Input gain verified"}"#.into()),
+        Err(error) => json_error(502, &error),
+    }
+}
+
 fn line_input_index(params: &HashMap<String, String>) -> Result<usize, &'static str> {
     params
         .get("input")
@@ -1132,9 +1401,16 @@ fn line_input_index(params: &HashMap<String, String>) -> Result<usize, &'static 
 fn vendor_target(
     params: &HashMap<String, String>,
     scope: &ServerScope,
+    meter_hub: &MeterHub,
     timeout: Duration,
 ) -> Result<(String, u64), BrowserResponse> {
     let host = allowed_host(params, scope).map_err(|error| json_error(400, &error))?;
+    if let Some(target) = meter_hub
+        .existing_target(&host)
+        .map_err(|error| json_error(502, &error))?
+    {
+        return Ok((host, target));
+    }
     let target_entity_id = DeviceClient::new(&host, timeout)
         .and_then(|client| client.request("GET", "/datastore", None))
         .and_then(|response| datastore_entity_id(&response.body))

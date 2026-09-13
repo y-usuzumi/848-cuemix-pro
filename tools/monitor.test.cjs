@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const fs = require('node:fs');
 const { fixture } = require('./console-fixture.cjs');
 require('../src/monitor.js');
 const M = globalThis.CueMixModel, Monitor = globalThis.CueMixMonitor;
@@ -40,9 +42,11 @@ test('front-panel multi-selection, muted state and disconnected setup stay visib
   assert.match(html,/Muted on the device/);
   assert.match(html,/unassigned input/);
   assert.match(html,/Monitor Group/);
-  assert.match(html,/<button[^>]+data-value="3"[^>]+aria-pressed="true"/);
-  assert.match(html,/aria-label="Select speakers A \+ C"/);
-  assert.match(html,/aria-label="Select speakers B \+ C"/);
+  assert.match(html,/<button[^>]+data-monitor-toggle="1"[^>]+data-value="2"[^>]+aria-pressed="true"/);
+  assert.match(html,/<button[^>]+data-monitor-toggle="2"[^>]+data-value="1"[^>]+aria-pressed="true"/);
+  assert.match(html,/<option value="3" selected>A \+ B/);
+  assert.match(html,/<option value="5">A \+ C/);
+  assert.match(html,/<option value="6">B \+ C/);
   assert.match(html,/value="-30"/);
 });
 
@@ -72,15 +76,40 @@ test('mute, mono and talk render independently and require valid advertised latc
   snapshot.records.find(r=>r[0]===0x13a3)[2]='01';
   snapshot.records.find(r=>r[0]===0x139a)[2]='01';
   let html=Monitor.render(M.create(snapshot),new Map());
-  assert.match(html,/<button[^>]+data-control="monitor-mute"[^>]+data-value="1"[^>]+aria-pressed="false">Mute · Off/);
-  assert.match(html,/<button[^>]+data-control="monitor-talk"[^>]+data-value="0"[^>]+aria-pressed="true">Talk · On/);
-  assert.match(html,/<button[^>]+data-control="monitor-mono"[^>]+data-value="0"[^>]+aria-pressed="true">Mono · On/);
+  assert.match(html,/<button[^>]+data-control="monitor-mute"[^>]+data-value="1"[^>]+aria-pressed="false"><span class="monitor-action-label">Mute<\/span><span class="monitor-action-state">Off/);
+  assert.match(html,/<button[^>]+data-control="monitor-talk"[^>]+data-value="0"[^>]+aria-pressed="true"><span class="monitor-action-label">Talk<\/span><span class="monitor-action-state">On/);
+  assert.match(html,/<button[^>]+data-control="monitor-mono"[^>]+data-value="0"[^>]+aria-pressed="true"><span class="monitor-action-label">Mono<\/span><span class="monitor-action-state">On/);
   assert.match(html,/Click to talk; click again to stop/);
   for(const [operation,property] of [['monitor-talk',0x13a3],['monitor-mono',0x139a]]) for(const value of [undefined,'02','0000']) {
     snapshot.records=snapshot.records.filter(r=>r[0]!==property);
     if(value!==undefined)snapshot.records.push([property,0,value]);
     html=Monitor.render(M.create(snapshot),new Map());
     assert.match(html,new RegExp(`<button[^>]+data-control="${operation}"[^>]+data-unavailable="true" disabled`));
+  }
+});
+
+test('live front-panel refresh preserves pointer targets and only changes state text when needed',()=>{
+  for(const [operation,property,label] of [['monitor-mute',0x139b,'Mute'],['monitor-mono',0x139a,'Mono'],['monitor-talk',0x13a3,'Talk']]) {
+    let text='Off', textUpdates=0;
+    const nameNode={textContent:label};
+    const stateNode={get textContent(){return text;},set textContent(value){text=value;textUpdates++;}};
+    const button={dataset:{},setAttribute(name,value){this[name]=value;},
+      querySelector:selector=>selector==='.monitor-action-state'?stateNode:nameNode,
+      set innerHTML(_){throw Error('A live refresh replaced the pending pointer target');}};
+    const context={CueMixModel:M,document:{
+      getElementById:id=>id==='monitorLevel'?{}:null,
+      querySelector:selector=>selector===`[data-control="${operation}"]`?button:null,
+      querySelectorAll:()=>[],
+    }};
+    vm.runInNewContext(fs.readFileSync(require.resolve('../src/monitor.js'),'utf8'),context);
+    for(let i=0;i<20;i++) context.CueMixMonitor.syncDom({records:[[property,0,'00']]});
+    assert.equal(textUpdates,0,'unchanged meter events must not rewrite labels');
+    context.CueMixMonitor.syncDom({records:[[property,0,'01']]});
+    assert.equal(stateNode.textContent,'On');
+    assert.equal(textUpdates,1);
+    assert.equal(button['aria-pressed'],'true');
+    assert.equal(button.dataset.value,'0');
+    assert.equal(nameNode.textContent,label);
   }
 });
 

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CueMix 848 · Devices</title>
+  <style>
+    :root { color-scheme: light; --bg:#e8edef; --ink:#192b30; --muted:#53686e; --panel:#f9fbfb; --well:#dce4e7; --line:#c9d5d9; --accent:#086e62; --accent-ink:#fff; --error:#ae323d; }
+    @media (prefers-color-scheme:dark) { :root:not([data-theme="light"]) { color-scheme:dark; --bg:#121718; --ink:#e8f0f1; --muted:#96a9af; --panel:#1a2022; --well:#232b2d; --line:#324044; --accent:#72dbc5; --accent-ink:#10231e; --error:#ff8b96; } }
+    :root[data-theme="dark"] { color-scheme:dark; --bg:#121718; --ink:#e8f0f1; --muted:#96a9af; --panel:#1a2022; --well:#232b2d; --line:#324044; --accent:#72dbc5; --accent-ink:#10231e; --error:#ff8b96; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+    header { padding:18px 28px; background:var(--panel); border-bottom:1px solid var(--line); }
+    .brand { display:flex; align-items:center; gap:14px; }
+    .brand-mark { font-size:29px; letter-spacing:-2px; line-height:1; padding-right:18px; border-right:1px solid var(--line); }
+    .brand-name { font-size:18px; line-height:1.25; }
+    .eyebrow { display:block; font-size:10px; letter-spacing:1.7px; color:var(--muted); }
+    main { width:min(1040px,100%); margin:0 auto; padding:clamp(24px,5vw,64px) 24px; }
+    h1 { margin:6px 0 10px; font-size:clamp(28px,4vw,36px); font-weight:500; letter-spacing:-1px; line-height:1.2; }
+    h2 { margin:0; font-size:17px; font-weight:500; }
+    h3 { margin:0; font-size:17px; font-weight:500; overflow-wrap:anywhere; }
+    p { margin:0; color:var(--muted); }
+    .intro { margin-bottom:28px; }
+    .home-grid { display:grid; grid-template-columns:minmax(0,1fr) 320px; align-items:start; gap:24px; }
+    .section-head { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:12px; }
+    .device-list { display:grid; gap:12px; }
+    .device, .manual, .empty, .recent { border:1px solid var(--line); border-radius:10px; background:var(--panel); padding:22px; min-width:0; }
+    .device-directory { display:grid; gap:18px; min-width:0; }
+    .recent[hidden] { display:none; }
+    .recent .section-head { gap:8px; }
+    .recent .section-head button { padding:4px 8px; min-height:32px; font-size:12px; }
+    .recent .device-address { width:100%; text-align:left; white-space:normal; }
+    .recent .device-addresses { grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr)); }
+    .recent p { margin-bottom:14px; font-size:12px; }
+    .device-head { display:flex; align-items:center; gap:14px; margin-bottom:16px; }
+    .device-icon { display:grid; place-items:center; width:42px; height:42px; flex-shrink:0; background:var(--well); border-radius:7px; font-size:24px; color:var(--accent); }
+    .device-host { overflow-wrap:anywhere; font-size:12px; margin-top:3px; }
+    .device-addresses { display:grid; gap:8px; }
+    .device-address { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:10px 12px; border:1px solid var(--line); border-radius:6px; color:var(--ink); text-decoration:none; }
+    .device-address code { overflow-wrap:anywhere; font-size:12px; }
+    .device-address span { color:var(--accent); white-space:nowrap; font-size:12px; }
+    .device-address:hover { background:var(--well); border-color:var(--accent); }
+    .device-address[aria-disabled="true"] { opacity:.6; pointer-events:none; }
+    button, input { font:inherit; border:1px solid var(--line); border-radius:6px; }
+    button { padding:8px 13px; min-height:38px; cursor:pointer; color:var(--ink); background:var(--panel); white-space:nowrap; }
+    button:hover { border-color:var(--accent); }
+    button:disabled { cursor:wait; opacity:.6; }
+    :is(button,input,a):focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+    .manual p { margin:8px 0 22px; }
+    label { display:block; margin-bottom:7px; font-size:12px; color:var(--muted); }
+    input { display:block; width:100%; padding:11px 12px; background:var(--bg); color:var(--ink); }
+    .manual button { width:100%; margin-top:12px; background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
+    .hint { display:block; color:var(--muted); font-size:11px; margin-top:12px; }
+    .empty { min-height:170px; display:flex; flex-direction:column; justify-content:center; gap:8px; }
+    .empty strong { font-weight:500; }
+    .status { margin:0 0 16px; color:var(--accent); overflow-wrap:anywhere; }
+    .status:empty, .scan-error:empty { display:none; }
+    .status.error, .scan-error { color:var(--error); }
+    .scan-error { margin-bottom:12px; font-size:12px; }
+    .footer-note { margin-top:24px; font-size:12px; }
+    @media (max-width:720px) { .home-grid { grid-template-columns:1fr; } main { padding:28px 18px; } header { padding:16px 20px; } .manual { max-width:none; } }
+  </style>
+  <script>
+    try { const theme=localStorage.getItem('cuemix-848-theme'); if(['light','dark'].includes(theme)) document.documentElement.dataset.theme=theme; } catch (_) {}
+  </script>
+</head>
+<body>
+  <header><div class="brand" aria-label="CueMix 848"><span class="brand-mark">848</span><div class="brand-name">CueMix<span class="eyebrow">CONTROL CONSOLE</span></div></div></header>
+  <main>
+    <div class="intro"><span class="eyebrow">YOUR STUDIO</span><h1>Choose your device</h1><p>Connect to your 848 to open its mixer, inputs, and monitor controls.</p></div>
+    <p id="connectStatus" class="status" role="status" aria-live="polite"></p>
+    <div class="home-grid">
+      <div class="device-directory">
+      <section aria-labelledby="discoveredTitle">
+        <div class="section-head"><h2 id="discoveredTitle">Discovered devices</h2><button id="scanDevices" type="button">Scan again</button></div>
+        <p id="scanError" class="scan-error" role="status">__DISCOVERY_ERROR__</p>
+        <div id="deviceList" class="device-list">__DEVICES__</div>
+      </section>
+      <section id="recentConnections" class="recent" aria-labelledby="recentTitle" hidden>
+        <div class="section-head"><h2 id="recentTitle">Recent connections</h2><button id="clearRecent" type="button" aria-label="Clear recent connections">Clear</button></div>
+        <p>Successful manual connections, saved in this browser.</p>
+        <div id="recentList" class="device-addresses"></div>
+      </section>
+      </div>
+      <section class="manual" aria-labelledby="manualTitle">
+        <h2 id="manualTitle">Connect by IP</h2><p>Device not listed? Enter its network address.</p>
+        <form id="manualConnect">
+          <label for="deviceAddress">IP address</label>
+          <input id="deviceAddress" name="host" type="text" placeholder="192.168.1.50" autocomplete="off" autocapitalize="none" spellcheck="false" required aria-describedby="addressHint">
+          <button id="connectDevice" type="submit">Connect</button>
+          <small id="addressHint" class="hint">IPv4 or IPv6. Find the address in your 848's network settings.</small>
+        </form>
+      </section>
+    </div>
+    <p class="footer-note">Devices must be reachable from this computer. You can scan again at any time.</p>
+  </main>
+  <script>__HOME_JS__</script>
+  <script>CueMixHome.mount(document, '__SESSION_TOKEN__');</script>
+</body>
+</html>
