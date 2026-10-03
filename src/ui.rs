@@ -11,6 +11,7 @@ pub(crate) fn render(default_host: &str, session_token: &str, home: bool) -> Str
         .replace("__SLIDER_QUEUE_JS__", include_str!("slider_queue.js"))
         .replace("__DB_ENTRY_JS__", include_str!("db_entry.js"))
         .replace("__CONSOLE_JS__", include_str!("console.js"))
+        .replace("__DEVICE_JS__", include_str!("device_settings.js"))
         .replace(
             "__DEVICE_HOME_LINK__",
             if home {

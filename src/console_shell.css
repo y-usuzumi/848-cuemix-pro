@@ -333,3 +333,14 @@ body.app-shell { height: 100dvh; min-height: 0; display: flex; flex-direction: c
   .app-shell input:not([type="range"]):not([type="checkbox"]) { font-size: 16px; }
 }
 @media (prefers-reduced-motion: reduce) { .meter-fill { transition: none; } }
+
+.device-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 28px; max-width: 850px; padding: 20px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.device-field { display: grid; min-width: 0; gap: 7px; }
+.device-field input, .device-field select { width: 100%; }
+.device-field :disabled { opacity: .6; cursor: not-allowed; }
+.device-name-row { display: flex; gap: 8px; }
+.device-name-row input { min-width: 0; }
+.device-checkbox { display: flex; align-items: center; gap: 8px; }
+.device-checkbox input { width: 16px; min-height: 16px; }
+.device-milan { min-height: 36px; }
+@media (max-width: 700px) { .device-settings { grid-template-columns: 1fr; } }

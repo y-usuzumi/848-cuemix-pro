@@ -53,6 +53,7 @@ if(require.main===module) {
       for(const p of [0x842b,0x843f]) state.records.push([p,i<<8,'00800000']);
       for(let b=0;b<26;b++) state.records.push([0x83f8,(i<<8)|b,M.encoded('level',-24)],[0x83f9,(i<<8)|b,'00800000']);
     }
+    state.records.push([0x000a,0,'00017700'],[0x000b,0,'00'],[0x000c,0,'00'],[0x1b5f,0,'00'],[0x1b5d,0,'0011'],[0x1b5b,16,'000177000100']);
     return state;
   };
   const banks={};
@@ -60,6 +61,10 @@ if(require.main===module) {
     const data=banks[bank]={maxCh:count};
     for(let i=0;i<count;i++) Object.assign(data,{[`ch/${i}/name`]:bank.endsWith('ibank/0')?['Vocal','Guitar','Room L','Room R'][i]:'', [`ch/${i}/trim`]:bank.endsWith('ibank/0')?28:0,[`ch/${i}/trimRange`]:'0:74',[`ch/${i}/48V`]:0,[`ch/${i}/pad`]:0,[`ch/${i}/phase`]:0});
   }
+  const entity = 'avb/0001f2fffefeb9e2';
+  const device = {uid:'0001f2fffefeb9e2', [`${entity}/entity_name`]:'848 Studio', [`${entity}/serial_number`]:'848AFEB9E2',
+    [`${entity}/firmware_version`]:'2.3.0 (simulated)', [`${entity}/current_configuration`]:0,
+    [`${entity}/cfg/0/current_sampling_rate`]:96000, [`${entity}/cfg/0/sample_rates`]:'44100:48000:88200:96000:176400:192000'};
   let snapshot=browserFixture(), requests=[], failNext=false, monitorRevision=1;
   const phoneLevels=[[32,32],[40,40]];
   const monitor=()=>({records:snapshot.records.filter(r=>[0x1393,0x1394,0x139a,0x139b,0x13a3,0x13b6].includes(r[0])),revision:monitorRevision});
@@ -67,6 +72,7 @@ if(require.main===module) {
   const page=()=> {
     let html=fs.readFileSync(path.join(root,'src/ui.html'),'utf8');
     for(const [marker,file] of [['CSS','console.css'],['PANELS','console_panels.html'],['MODEL','console_model.js'],['JS','console.js']]) html=html.replace('__CONSOLE_'+marker+'__',fs.readFileSync(path.join(root,'src',file),'utf8'));
+    html=html.replace('__DEVICE_JS__',fs.readFileSync(path.join(root,'src/device_settings.js'),'utf8'));
     html=html.replace('__MONITOR_JS__',fs.readFileSync(path.join(root,'src/monitor.js'),'utf8'));
     html=html.replace('__SLIDER_QUEUE_JS__',fs.readFileSync(path.join(root,'src/slider_queue.js'),'utf8'));
     html=html.replace('__DB_ENTRY_JS__',fs.readFileSync(path.join(root,'src/db_entry.js'),'utf8'));
@@ -88,7 +94,7 @@ if(require.main===module) {
         const tick=()=>res.write('event: meters\ndata: '+JSON.stringify({status:'ok',age_ms:0,error:null,monitor:monitor(),faders:{},records:[record('138c',0,4),record('13ac',0,8),record('13ad',0,24),record('13ad',1,2),record('13ad',3,26),record('13ad',4,2)]})+'\n\n');
         tick();const timer=setInterval(tick,60);req.on('close',()=>clearInterval(timer));return;
       }
-      if(url.pathname==='/api/get') return json(200,{body:JSON.stringify(banks[url.searchParams.get('path')]||{})});
+      if(url.pathname==='/api/get') return json(200,{status:200,body:JSON.stringify(url.searchParams.get('path')==='/datastore'?device:banks[url.searchParams.get('path')]||{})});
       return json(200,{});
     }
     let body='';req.on('data',c=>body+=c);req.on('end',()=> {
@@ -99,7 +105,11 @@ if(require.main===module) {
       if(form.get('host')!=='simulated-device'||form.get('token')!=='fixture-token') return json(403,{error:'Invalid fixture identity'});
       if(failNext) {failNext=false;return json(409,{error:'Simulated device conflict; refresh and review.'});}
       if(url.pathname==='/api/set') {
-        const field=form.get('path'), bank=Object.keys(banks).find(key=>field.startsWith(key+'/'));
+        const field=form.get('path');
+        if(field===`/datastore/${entity}/entity_name`) {
+          device[`${entity}/entity_name`]=form.get('value');requests.push({path:field,value:form.get('value')});return json(200,{status:200,body:'ok'});
+        }
+        const bank=Object.keys(banks).find(key=>field.startsWith(key+'/'));
         if(!bank) return json(400,{error:'Unknown fixture datastore path'});
         const key=field.slice(bank.length+1);banks[bank][key]=key.endsWith('/name')?form.get('value'):Number(form.get('value'));
         requests.push({path:field,value:form.get('value')});return json(200,{body:'ok'});
@@ -122,6 +132,12 @@ if(require.main===module) {
       }
       if(url.pathname!=='/api/console/changes') return json(400,{error:'Not a simulated console operation'});
       const edits=form.get('changes').split(';').map(c=>c.split(':'));
+      const deviceProperties={'device-rate':0x000a,'device-clock':0x000b,'device-word-clock':0x000c,'device-clock-stream':0x1b5f};
+      if(edits.every(([op])=>op in deviceProperties)) {
+        if(edits.some(([op,target,i,old])=>target!=='device'||i!=='0'||snapshot.records.find(r=>r[0]===deviceProperties[op]&&r[1]===0)?.[2]!==old)) return json(409,{error:'Simulated conflict'});
+        for(const [op,,,,value] of edits) snapshot.records.find(r=>r[0]===deviceProperties[op]&&r[1]===0)[2]=Number(value).toString(16).padStart(op==='device-rate'?8:2,'0');
+        requests.push(edits);return json(200,{acknowledged:edits.length});
+      }
       const model=M.create(snapshot);
       if(edits.some(([op,target,i,old])=>model.records.get(M.address(op,target,Number(i)))!==old)) return json(409,{error:'Simulated conflict'});
       for(const [op,target,i,old,value] of edits) {

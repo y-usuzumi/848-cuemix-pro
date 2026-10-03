@@ -747,3 +747,29 @@ The output is JSON Lines so we can collect evidence from the hardware and then
 promote working paths into first-class controls.
 
 Use `--timeout-ms` on any command if your device or network is slow.
+
+## Device settings
+
+The **Device** tab shows name, serial number, firmware and sample rate.
+Name edits use raw datastore root-key writes. Sample rate, Clock Source and
+Word Clock Out/Thru use the existing vendor session, fresh expected-byte checks,
+and verified readback. Clock choices are Internal, Word Clock, Optical A/B,
+Input Stream 1–16 and Media Clock Input, limited to advertised clock streams.
+Sample rates are 44100, 48000, 88200, 96000, 176400 and 192000 Hz. Changing
+sample rate or clock source can interrupt audio. Opening or refreshing the tab
+only reads state; it polls every five seconds while visible and preserves a
+focused name edit.
+
+IPv4 prefers the device-reported vendor field and falls back to the literal
+connected address. IPv6 currently shows the literal connected IPv6 address.
+Buffer Size, Output Safety Offset and WDM settings retain the requested choices
+but require a native MOTU Windows-driver backend. Static inspection confirms
+these use local Windows driver IOCTLs rather than network properties; the Linux
+server cannot control Windows WDM settings over AVDECC. Milan is empty and AVB
+Input/Output Streams are omitted.
+
+See [Device protocol evidence](docs/device-protocol.md) for the exact recovered
+properties, converters, read-only hardware observations and driver research.
+Clock/rate setters are covered by synthetic validation and the shared session
+write/readback tests; live setter behavior still needs a controlled hardware
+session. No clock or rate changes were made during automated verification.

@@ -279,6 +279,7 @@
       <button id="tab-outputs" type="button" aria-controls="panel-outputs" data-tab="outputs"><span class="nav-symbol" aria-hidden="true">◫</span>Outputs</button>
       <button id="tab-mixer" type="button" aria-controls="panel-mixer" data-tab="mixer"><span class="nav-symbol" aria-hidden="true">☷</span>Mixing</button>
       <button id="tab-patchbay" type="button" aria-controls="panel-patchbay" data-tab="patchbay"><span class="nav-symbol" aria-hidden="true">↳</span>Connections<span id="routeCount" class="route-count" hidden></span></button>
+      <button id="tab-device" type="button" aria-controls="panel-device" data-tab="device"><span class="nav-symbol" aria-hidden="true">⚙</span>Device</button>
       <button id="tab-diagnostics" type="button" aria-controls="panel-diagnostics" data-tab="diagnostics"><span class="nav-symbol" aria-hidden="true">⌁</span>Diagnostics</button>
     </nav>
   <main class="app-body">
@@ -297,6 +298,25 @@
       <div id="outputLineBank" class="bank-workspace"><div class="bank-toolbar"><h3>Line Output Gains</h3><div class="bank-controls"><div id="outputOutPages" class="bank-pages"></div><button id="loadOutputs" class="secondary" aria-label="Refresh all outputs">Refresh</button></div></div><div id="outputOut" class="output-grid hardware-strips"><div class="empty">Loading outputs…</div></div><p class="workspace-note">Output trims set relative levels. The monitor knob controls the shared listening level.</p></div>
       <div id="outputSetupBank" class="bank-workspace" hidden><div id="monitorSetupControls"><p class="empty">Loading monitor connections…</p></div></div>
     </section>
+<section id="panel-device" class="tab-panel" role="region" aria-labelledby="tab-device" hidden>
+<div class="workspace-heading"><div><div class="eyebrow">HARDWARE</div><h2>Device</h2></div><button id="loadDevice" type="button" class="secondary">Refresh</button></div>
+<div class="device-settings"><label class="device-field">Device Name<div class="device-name-row"><input id="deviceName" disabled autocomplete="off"><button id="saveDeviceName" type="button" disabled>Save</button></div></label>
+<label class="device-field">Serial Number<input id="deviceSerial" readonly placeholder="Unavailable"></label>
+<label class="device-field">Firmware<input id="deviceFirmware" readonly placeholder="Unavailable"></label>
+<label class="device-field">Sample Rate<select id="deviceRate" disabled><option value="">Unavailable</option><option value="44100">44100</option><option value="48000">48000</option><option value="88200">88200</option><option value="96000">96000</option><option value="176400">176400</option><option value="192000">192000</option></select></label>
+<label class="device-field">Clock Source<select id="deviceClock" disabled><option value="">Unavailable</option><option value="0">Internal</option><option value="5">Word Clock</option><option value="12">Optical A</option><option value="13">Optical B</option><option value="stream-0">Input Stream 1</option><option value="stream-1">Input Stream 2</option><option value="stream-2">Input Stream 3</option><option value="stream-3">Input Stream 4</option><option value="stream-4">Input Stream 5</option><option value="stream-5">Input Stream 6</option><option value="stream-6">Input Stream 7</option><option value="stream-7">Input Stream 8</option><option value="stream-8">Input Stream 9</option><option value="stream-9">Input Stream 10</option><option value="stream-10">Input Stream 11</option><option value="stream-11">Input Stream 12</option><option value="stream-12">Input Stream 13</option><option value="stream-13">Input Stream 14</option><option value="stream-14">Input Stream 15</option><option value="stream-15">Input Stream 16</option><option value="stream-16">Media Clock Input</option></select></label>
+<label class="device-field">Word Clock<select id="deviceWordClock" disabled><option value="">Unavailable</option><option value="1">Out</option><option value="0">Thru</option></select></label>
+<label class="device-field">IPv4 Address<input id="deviceIpv4" readonly placeholder="Unavailable"></label>
+<label class="device-field">IPv6 Address<input id="deviceIpv6" readonly placeholder="Unavailable"></label>
+<label class="device-field">Milan<div class="device-milan" aria-label="Milan"></div></label>
+<label class="device-field">Buffer Size<select id="deviceBuffer" disabled aria-describedby="deviceUnavailable"><option value="">Unavailable</option><option value="32">32</option><option value="64">64</option><option value="128">128</option><option value="256">256</option><option value="512">512</option><option value="1024">1024</option><option value="2048">2048</option><option value="4096">4096</option></select></label>
+<label class="device-field">Output Safety Offset<select id="deviceSafety" disabled aria-describedby="deviceUnavailable"><option value="">Unavailable</option><option value="8">Small (8 samples)</option><option value="96">Medium (96 samples)</option><option value="192">Large (192 samples)</option></select></label>
+<div class="device-field"><label for="deviceWdmInput">WDM Input Streams</label><select id="deviceWdmInput" disabled aria-describedby="deviceUnavailable"><option value="">Unavailable</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="9">9</option><option value="10">10</option><option value="11">11</option><option value="12">12</option></select><label class="device-checkbox"><input type="checkbox" disabled aria-describedby="deviceUnavailable">Multichannel input stream</label></div>
+<div class="device-field"><label for="deviceWdmOutput">WDM Output</label><select id="deviceWdmOutput" disabled aria-describedby="deviceUnavailable"><option value="">Unavailable</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="9">9</option><option value="10">10</option><option value="11">11</option><option value="12">12</option></select><label class="device-checkbox"><input type="checkbox" disabled aria-describedby="deviceUnavailable">Multichannel output stream</label></div></div>
+<p id="deviceUnavailable" class="workspace-note">Buffer, safety offset and WDM settings require the MOTU Windows driver on the server computer.</p>
+<p class="workspace-note">Sample-rate and clock changes can interrupt audio.</p>
+<p id="deviceStatus" class="strip-status" aria-live="polite"></p>
+</section>
     __CONSOLE_PANELS__
     <section id="panel-diagnostics" class="diagnostics tab-panel" role="region" aria-labelledby="tab-diagnostics" hidden>
 <details id="legacyMixer"><summary>Legacy fader diagnostics and meter tools</summary>
@@ -468,6 +488,7 @@
       CueMixLayout.activate(activeView);
       if (updateHash) history.replaceState(null, '', `#${activeTab.dataset.tab}`);
       if (focusTab) activeTab.focus();
+      if (activeView === 'device') DeviceSettings.load();
       if (activeTab.dataset.tab === 'mixer') {
         loadMeterLabels();
       }
@@ -1497,6 +1518,8 @@
         loadMeters();
       }
     });
+    __DEVICE_JS__
+    DeviceSettings.init();
     activateTab(window.location.hash.slice(1), { updateHash: false });
     loadPreamps();
     loadMeterLabels();
