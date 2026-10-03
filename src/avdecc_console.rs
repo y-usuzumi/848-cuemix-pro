@@ -37,6 +37,7 @@ pub(crate) struct ConsoleWriteError {
 
 fn relevant(property: u16) -> bool {
     matches!(property,
+        0x0005 | 0x000a..=0x000c | 0x1b5d | 0x1b5f |
         0x8020..=0x8025 | 0x8027..=0x802d | 0x802f |
         0x03e8 | 0x03e9 | 0x83f8 | 0x83f9 | 0x03fa | 0x03fb |
         0x0403 | 0x0404 | 0x0411 | 0x0412 |
@@ -148,8 +149,84 @@ impl ConsoleState {
             && (0..2).all(|i| self.get(0x93b9, i).is_ok_and(|v| v.len() == 4))
     }
 
+    fn clock_stream_available(&self, stream: u8) -> bool {
+        let Ok([hi, lo]) = self.get(0x1b5d, 0) else {
+            return false;
+        };
+        let count = u16::from_be_bytes([*hi, *lo]);
+        count <= 17
+            && u16::from(stream) < count
+            && self
+                .get(0x1b5b, u16::from(stream))
+                .is_ok_and(|v| v.len() == 6)
+    }
+
     fn resolve(&self, change: &ConsoleChange) -> Result<WriteRecord, String> {
         let (property, index, value) = match change.operation.as_str() {
+            "device-clock" | "device-clock-stream" | "device-word-clock" | "device-rate" => {
+                if change.target != "device" || change.index != 0 {
+                    return Err("device controls require target device and index zero".into());
+                }
+                match change.operation.as_str() {
+                    "device-clock" => {
+                        let source = change
+                            .value
+                            .parse::<u8>()
+                            .map_err(|_| "invalid clock source")?;
+                        if !matches!(source, 0 | 4 | 5 | 12 | 13)
+                            || !matches!(self.get(0x000b, 0)?, [0 | 4 | 5 | 8 | 12 | 13])
+                        {
+                            return Err("unsupported device clock source".into());
+                        }
+                        if source == 4 {
+                            let Ok([stream]) = self.get(0x1b5f, 0) else {
+                                return Err("AVB clock selector is unavailable".into());
+                            };
+                            if !self.clock_stream_available(*stream) {
+                                return Err("current AVB clock input is not advertised".into());
+                            }
+                        }
+                        (0x000b, 0, vec![source])
+                    }
+                    "device-clock-stream" => {
+                        let stream = change
+                            .value
+                            .parse::<u8>()
+                            .map_err(|_| "invalid clock stream")?;
+                        if !self.clock_stream_available(stream)
+                            || !matches!(self.get(0x1b5f, 0)?, [0..=16])
+                        {
+                            return Err(
+                                "clock input stream is not advertised by this device".into()
+                            );
+                        }
+                        (0x1b5f, 0, vec![stream])
+                    }
+                    "device-word-clock" => {
+                        if !matches!(self.get(0x000c, 0)?, [0 | 1]) {
+                            return Err("unexpected Word Clock mode".into());
+                        }
+                        (0x000c, 0, vec![parse_bool(&change.value)?])
+                    }
+                    _ => {
+                        let rate = change
+                            .value
+                            .parse::<u32>()
+                            .map_err(|_| "invalid sample rate")?;
+                        let current = self.get(0x000a, 0)?;
+                        if !matches!(rate, 44100 | 48000 | 88200 | 96000 | 176400 | 192000)
+                            || current.len() != 4
+                            || !matches!(
+                                u32::from_be_bytes(current.try_into().unwrap()),
+                                44100 | 48000 | 88200 | 96000 | 176400 | 192000
+                            )
+                        {
+                            return Err("unsupported sample rate".into());
+                        }
+                        (0x000a, 0, rate.to_be_bytes().to_vec())
+                    }
+                }
+            }
             "route" => {
                 let property = match change.target.as_str() {
                     "line" => 0x93ac,
@@ -334,6 +411,13 @@ impl ConsoleState {
     }
 
     pub(super) fn prepare(&self, changes: &[ConsoleChange]) -> Result<Vec<WriteRecord>, String> {
+        if changes.iter().any(|c| c.operation == "device-clock-stream")
+            && !changes
+                .iter()
+                .any(|c| c.operation == "device-clock" && c.value == "4")
+        {
+            return Err("clock stream edits require a matching AVB clock source edit".into());
+        }
         let mut keys = BTreeSet::new();
         let mut result = Vec::new();
         for change in changes {

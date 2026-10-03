@@ -368,3 +368,108 @@ fn master_and_pre_controls_address_each_selected_bus_channel() {
         assert!(console.prepare(&parse_changes(invalid).unwrap()).is_err());
     }
 }
+
+fn device_state() -> ConsoleState {
+    let rows: &[(u16, u16, &[u8])] = &[
+        (0x0005, 0, b"192.168.4.166\0xx"),
+        (0x000a, 0, &[0, 1, 0x77, 0]),
+        (0x000b, 0, &[0]),
+        (0x000c, 0, &[0]),
+        (0x1b5d, 0, &[0, 17]),
+        (0x1b5f, 0, &[0]),
+        (0x1b5b, 0, &[0, 1, 0x77, 0, 8, 0]),
+        (0x1b5b, 15, &[0, 1, 0x77, 0, 8, 0]),
+        (0x1b5b, 16, &[0, 1, 0x77, 0, 0, 0]),
+    ];
+    ConsoleState::from_records(
+        rows.iter()
+            .map(|&(property_id, property_index, value)| VendorStateRecord {
+                property_id,
+                property_index,
+                value: value.to_vec(),
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn device_clock_controls_use_vendor_values_and_bound_advertised_streams() {
+    let state = device_state();
+    for source in [0, 5, 12, 13] {
+        let changes = parse_changes(&format!("device-clock:device:0:00:{source}")).unwrap();
+        let writes = state.prepare(&changes).unwrap();
+        if source == 0 {
+            assert!(writes.is_empty());
+        } else {
+            assert_eq!(
+                (writes[0].property, writes[0].index, writes[0].value.clone()),
+                (0x000b, 0, vec![source])
+            );
+        }
+    }
+    for stream in [0, 15, 16] {
+        let changes = parse_changes(&format!(
+            "device-clock-stream:device:0:00:{stream};device-clock:device:0:00:4"
+        ))
+        .unwrap();
+        let writes = state.prepare(&changes).unwrap();
+        assert_eq!(writes.last().unwrap().property, 0x000b);
+        assert_eq!(writes.last().unwrap().value, [4]);
+        if stream != 0 {
+            assert_eq!(writes[0].property, 0x1b5f);
+            assert_eq!(writes[0].value, [stream]);
+        }
+    }
+    for invalid in [
+        "device-clock:device:0:00:1",
+        "device-clock:device:0:00:8",
+        "device-clock:device:1:00:5",
+        "device-clock:monitor:0:00:5",
+        "device-clock-stream:device:0:00:15",
+        "device-clock-stream:device:0:00:17;device-clock:device:0:00:4",
+        "device-clock-stream:device:0:00:1;device-clock:device:0:00:4",
+    ] {
+        assert!(
+            state.prepare(&parse_changes(invalid).unwrap()).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn device_settings_require_expected_bytes_and_do_not_change_missing_controls() {
+    let state = device_state();
+    let writes = state
+        .prepare(
+            &parse_changes("device-word-clock:device:0:00:1;device-rate:device:0:00017700:192000")
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        (writes[0].property, writes[0].value.clone()),
+        (0x000c, vec![1])
+    );
+    assert_eq!(
+        (writes[1].property, writes[1].value.clone()),
+        (0x000a, 192000_u32.to_be_bytes().to_vec())
+    );
+    assert!(state
+        .prepare(&parse_changes("device-rate:device:0:00017700:96000").unwrap())
+        .unwrap()
+        .is_empty());
+    for invalid in [
+        "device-word-clock:device:0:00:2",
+        "device-rate:device:0:00017700:12345",
+        "device-clock-stream:device:0:00:15;device-clock:device:0:05:4",
+        "device-word-clock:device:0:01:1",
+    ] {
+        assert!(
+            state.prepare(&parse_changes(invalid).unwrap()).is_err(),
+            "{invalid}"
+        );
+    }
+    assert!(self::state()
+        .prepare(&parse_changes("device-word-clock:device:0:00:1").unwrap())
+        .is_err());
+}

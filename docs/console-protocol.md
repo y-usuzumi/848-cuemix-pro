@@ -402,3 +402,10 @@ deadline with other slider work. No setter is retried automatically. HTTP
 polling remains for input recovery and non-gain input controls keep their raw
 `json={...}` datastore transport. Automated verification uses simulated peers;
 the exact gain setters have not been exercised against live audio hardware.
+
+## Device-wide controls
+
+The same vendor session now exposes native sample rate, Clock Source, Word
+Clock Out/Thru, clock-input inventory/selector and the reported IPv4 field. See
+[Device protocol evidence](device-protocol.md) for converters, property IDs,
+read-only checks and the separate local Windows-driver research.

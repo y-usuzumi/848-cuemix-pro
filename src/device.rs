@@ -302,7 +302,12 @@ pub(crate) fn datastore_write_request(path: &str, value: &str) -> Result<(String
     if let Some(key) = path.strip_prefix("/datastore/") {
         // Firmware 2.3 accepts this raw root-body form, but ignores individual
         // datastore-path writes and percent-encoded inner JSON.
-        let object = format!("{{\"{}\":{}}}", json_escape(key), json_value(value));
+        let encoded_value = if key.starts_with("avb/") && key.ends_with("/entity_name") {
+            format!("\"{}\"", json_escape(value))
+        } else {
+            json_value(value)
+        };
+        let object = format!("{{\"{}\":{}}}", json_escape(key), encoded_value);
         return Ok(("/datastore".to_string(), format!("json={object}")));
     }
     Ok((path, datastore_set_body(value)))
@@ -496,6 +501,23 @@ mod tests {
         );
         assert!(DeviceClient::new("http://848.local/control", Duration::from_secs(1)).is_err());
         assert!(parse_device_address("[fe80::1%bad/scope]").is_err());
+    }
+
+    #[test]
+    fn device_names_remain_strings_even_when_they_look_like_json() {
+        for value in ["123", "true", "null", "", "848 & \"Studio\""] {
+            let (path, body) =
+                datastore_write_request("/datastore/avb/0001f2fffefeb9e2/entity_name", value)
+                    .unwrap();
+            assert_eq!(path, "/datastore");
+            assert_eq!(
+                body,
+                format!(
+                    "json={{\"avb/0001f2fffefeb9e2/entity_name\":\"{}\"}}",
+                    json_escape(value)
+                )
+            );
+        }
     }
 
     #[test]
